@@ -333,8 +333,10 @@ def run_experiment(args):
     print("\n创建模型...")
     if args.dataset == 'MNIST':
         model = CNN_MNIST(num_classes=num_classes)
+        model_factory = lambda num_classes: CNN_MNIST(num_classes=num_classes)
     elif args.dataset in ['CIFAR10', 'CIFAR100']:
         model = ResNet18(num_classes=num_classes)
+        model_factory = lambda num_classes: ResNet18(num_classes=num_classes)
     else:
         raise ValueError(f"不支持的数据集: {args.dataset}")
 
@@ -349,7 +351,7 @@ def run_experiment(args):
     print("在完整训练集上训练")
     print("=" * 80)
 
-    model_full = model.__class__(num_classes=num_classes).to(device)
+    model_full = model_factory(num_classes=num_classes).to(device)
     history_full = train_model(
         model_full,
         train_loader,
@@ -367,7 +369,7 @@ def run_experiment(args):
     print("在Coreset上训练")
     print("=" * 80)
 
-    model_coreset = model.__class__(num_classes=num_classes).to(device)
+    model_coreset = model_factory(num_classes=num_classes).to(device)
     history_coreset = train_model(
         model_coreset,
         coreset_loader,
