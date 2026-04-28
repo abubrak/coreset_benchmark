@@ -289,16 +289,25 @@ def run_experiment(args):
         # BCSR方法
         print("使用BCSR方法...")
 
-        # 使用shuffle=False确保特征矩阵的索引与数据集索引一致
-        print("提取特征...")
+        # 使用深度特征提取（基于随机初始化的ResNet）
+        print("提取深度特征...")
+        # 创建临时特征提取器
+        feature_extractor = ResNet18(num_classes=num_classes).to(device)
+        # 移除最后的分类层，获取倒数第二层特征
+        feature_extractor.fc = nn.Identity()
+        feature_extractor.eval()
+
         all_features = []
         all_labels = []
 
-        for inputs, labels in train_loader_noshuffle:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            all_features.append(inputs.view(inputs.size(0), -1))
-            all_labels.append(labels)
+        with torch.no_grad():
+            for inputs, labels in train_loader_noshuffle:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                # 提取深度特征 (512维)
+                features = feature_extractor(inputs)
+                all_features.append(features)
+                all_labels.append(labels)
 
         X_train = torch.cat(all_features, dim=0)
         y_train = torch.cat(all_labels, dim=0)
@@ -329,16 +338,24 @@ def run_experiment(args):
         # 基线方法
         print(f"使用{args.method.upper()}方法...")
 
-        # 使用shuffle=False确保索引一致
+        # 使用深度特征（与BCSR一致）
+        print("提取深度特征...")
+        feature_extractor = ResNet18(num_classes=num_classes).to(device)
+        feature_extractor.fc = nn.Identity()
+        feature_extractor.eval()
+
         all_features = []
         all_labels = []
 
-        for inputs, labels in train_loader_noshuffle:
-            all_features.append(inputs.view(inputs.size(0), -1))
-            all_labels.append(labels)
+        with torch.no_grad():
+            for inputs, labels in train_loader_noshuffle:
+                inputs = inputs.to(device)
+                features = feature_extractor(inputs)
+                all_features.append(features.cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
 
-        X_train = torch.cat(all_features, dim=0).numpy()
-        y_train = torch.cat(all_labels, dim=0).numpy()
+        X_train = np.concatenate(all_features, axis=0)
+        y_train = np.concatenate(all_labels, axis=0)
 
         print(f"特征形状: {X_train.shape}")
 
