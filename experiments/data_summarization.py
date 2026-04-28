@@ -271,14 +271,14 @@ def run_experiment(args):
 
     # 训练子集（带增强，排除验证集）
     train_subset_aug = Subset(train_dataset_aug, train_indices)
+    # 训练子集（无增强，用于特征提取，与 train_subset_aug 索引一致）
+    train_subset_noaug = Subset(train_dataset_noaug, train_indices)
     # 验证子集（无增强）
     val_subset = Subset(train_dataset_noaug, val_indices)
-    # 特征提取用完整训练集（无增强，shuffle=False 保证索引一致）
-    train_dataset_for_features = train_dataset_noaug
 
     # 数据加载器
     train_loader = get_dataloader(train_subset_aug, batch_size=args.batch_size, shuffle=True)
-    train_loader_noshuffle = get_dataloader(train_dataset_for_features, batch_size=args.batch_size, shuffle=False)
+    train_loader_noshuffle = get_dataloader(train_subset_noaug, batch_size=args.batch_size, shuffle=False)
     val_loader = get_dataloader(val_subset, batch_size=args.batch_size, shuffle=False)
     test_loader = get_dataloader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
@@ -286,8 +286,8 @@ def run_experiment(args):
     print(f"验证集大小: {val_size}")
     print(f"测试集大小: {len(test_dataset)}")
 
-    # 计算coreset大小
-    coreset_size = int(len(train_dataset) * args.selection_ratio)
+    # 计算coreset大小（基于训练子集，不包括验证集）
+    coreset_size = int(len(train_subset_aug) * args.selection_ratio)
     print(f"\nCoreset大小: {coreset_size} (选择比例: {args.selection_ratio})")
 
     # 选择方法
@@ -384,7 +384,8 @@ def run_experiment(args):
     print(f"选择的样本数: {len(selected_indices)}")
 
     # 创建coreset数据集
-    coreset_dataset = Subset(train_dataset, selected_indices)
+    # selected_indices 是 train_subset_noaug 的局部索引，映射到 train_subset_aug
+    coreset_dataset = Subset(train_subset_aug, selected_indices)
     coreset_loader = get_dataloader(coreset_dataset, batch_size=args.batch_size, shuffle=True)
 
     print(f"Coreset数据集大小: {len(coreset_dataset)}")
@@ -467,7 +468,7 @@ def run_experiment(args):
         'method': args.method,
         'selection_ratio': args.selection_ratio,
         'coreset_size': coreset_size,
-        'num_samples': len(train_dataset),
+        'num_samples': len(train_dataset_aug),
         'test_acc_full': test_acc_full,
         'test_acc_coreset': test_acc_coreset,
         'performance_drop': performance_drop,
