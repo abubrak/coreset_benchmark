@@ -29,7 +29,8 @@ import warnings
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.datasets.data_loaders import get_dataset, get_dataloader, DATASET_STATS
-from src.models.cnn import CNN_MNIST, CNN_CIFAR
+from src.models.cnn import CNN_MNIST
+from src.models.resnet import ResNet18
 from src.baselines.baseline_methods import get_baseline
 from src.coreset.selection_functions import (
     select_by_loss_diff,
@@ -665,7 +666,7 @@ def run_continual_learning(args):
         if args.dataset == 'MNIST':
             model = CNN_MNIST(num_classes=args.num_classes_per_task)
         else:
-            model = CNN_CIFAR(num_classes=args.num_classes_per_task)
+            model = ResNet18(num_classes=args.num_classes_per_task)
     else:
         raise ValueError(f"不支持的模型: {args.model}")
 

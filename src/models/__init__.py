@@ -41,7 +41,7 @@ def get_model(dataset: str, num_classes: int = 10):
     if dataset == 'MNIST':
         return CNN_MNIST(num_classes=num_classes)
     elif dataset in ['CIFAR10', 'CIFAR-10', 'CIFAR100', 'CIFAR-100']:
-        return CNN_CIFAR(num_classes=num_classes)
+        return ResNet18(num_classes=num_classes)
     else:
         raise ValueError(
             f"Unknown dataset: {dataset}. "

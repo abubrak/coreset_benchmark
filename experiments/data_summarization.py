@@ -29,7 +29,8 @@ sys.path.insert(0, str(project_root))
 from src.datasets.data_loaders import get_dataset, get_dataloader, DATASET_STATS
 from src.baselines.baseline_methods import get_baseline
 from src.coreset.bcsr_coreset import BCSRCoreset
-from src.models.cnn import CNN_MNIST, CNN_CIFAR
+from src.models.cnn import CNN_MNIST
+from src.models.resnet import ResNet18
 from src.training.losses import cross_entropy_loss
 
 
@@ -333,7 +334,7 @@ def run_experiment(args):
     if args.dataset == 'MNIST':
         model = CNN_MNIST(num_classes=num_classes)
     elif args.dataset in ['CIFAR10', 'CIFAR100']:
-        model = CNN_CIFAR(num_classes=num_classes)
+        model = ResNet18(num_classes=num_classes)
     else:
         raise ValueError(f"不支持的数据集: {args.dataset}")
 
