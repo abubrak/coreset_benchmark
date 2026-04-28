@@ -199,15 +199,14 @@ class KMeansSelector(BaselineSelector):
 
 
 class HerdingSelector(BaselineSelector):
-    """Kernel herding selector."""
+    """Kernel herding selector with memory-efficient batched computation."""
 
     def select(self, X: np.ndarray, y: Optional[np.ndarray] = None,
                size: int = 100, **kwargs) -> np.ndarray:
         """
         Select samples using kernel herding.
 
-        Iteratively selects samples that minimize the distance between
-        the empirical kernel mean and the target distribution.
+        Uses batched distance computation to avoid O(n^2) memory allocation.
 
         Parameters
         ----------
@@ -239,41 +238,63 @@ class HerdingSelector(BaselineSelector):
         if random_state is not None:
             np.random.seed(random_state)
 
-        # Compute kernel matrix
+        def _rbf_kernel_batch(X_a, X_b, gamma):
+            """Compute RBF kernel between two sets in batches."""
+            # ||a - b||^2 = ||a||^2 + ||b||^2 - 2*a^T*b
+            X_a_sq = np.sum(X_a ** 2, axis=1, keepdims=True)
+            X_b_sq = np.sum(X_b ** 2, axis=1, keepdims=True)
+            dist_sq = X_a_sq + X_b_sq.T - 2.0 * (X_a @ X_b.T)
+            dist_sq = np.maximum(dist_sq, 0.0)
+            return np.exp(-gamma * dist_sq)
+
+        # Compute mean kernel vector: mu_i = (1/n) * sum_j K(x_i, x_j)
         if kernel == 'rbf':
-            # RBF kernel: K(x, y) = exp(-gamma * ||x - y||^2)
-            dists = pairwise_distances(X, metric='euclidean')
-            K = np.exp(-gamma * dists ** 2)
+            X_sq = np.sum(X ** 2, axis=1)
+            mean_K = np.zeros(n_samples)
+            batch_size = 1024
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                # ||X[start:end] - X||^2 = X_sq[start:end, None] + X_sq[None, :] - 2*X_batch @ X.T
+                dist_sq = X_sq[start:end, None] + X_sq[None, :] - 2.0 * (X[start:end] @ X.T)
+                dist_sq = np.maximum(dist_sq, 0.0)
+                K_batch = np.exp(-gamma * dist_sq)
+                mean_K[start:end] = K_batch.mean(axis=1)
         elif kernel == 'linear':
-            # Linear kernel: K(x, y) = x^T y
-            K = X @ X.T
+            KX = X @ X.T  # (n, n) - can be large but float64 ~ 28GB for 60k
+            # For large datasets, compute mean per-row incrementally
+            mean_K = np.zeros(n_samples)
+            batch_size = 1024
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                K_batch = X[start:end] @ X.T
+                mean_K[start:end] = K_batch.mean(axis=1)
         else:
             raise ValueError(f"Unknown kernel: {kernel}")
 
-        # Compute mean kernel
-        mean_K = K.mean(axis=1)
-
-        # Herding algorithm
+        # Herding algorithm - compute kernel columns on demand
         indices = []
         selected = np.zeros(n_samples, dtype=bool)
+        cumulative_K = np.zeros(n_samples)
 
-        for _ in range(size):
-            if len(indices) == 0:
-                # First iteration: select sample closest to mean
+        for t in range(size):
+            if t == 0:
                 scores = mean_K
             else:
-                # Compute current empirical mean
-                empirical_mean = K[:, indices].mean(axis=1)
-                # Select sample that minimizes distance to mean
-                scores = mean_K - empirical_mean
+                # empirical_mean = mean of K[:, indices] columns
+                scores = mean_K - cumulative_K / t
 
-            # Mask already selected samples
             scores[selected] = -np.inf
-
-            # Select best sample
             idx = np.argmax(scores)
             indices.append(idx)
             selected[idx] = True
+
+            # Accumulate kernel column for the selected sample
+            if kernel == 'rbf':
+                diff = X - X[idx]
+                col = np.exp(-gamma * np.sum(diff ** 2, axis=1))
+            else:
+                col = X @ X[idx]
+            cumulative_K += col
 
         return np.array(indices)
 

@@ -35,7 +35,7 @@ ENV/
 *.ipynb_checkpoints
 
 # Data
-# data/
+data/
 # datasets/
 # *.csv
 # *.pkl

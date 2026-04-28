@@ -30,7 +30,7 @@ from src.datasets.data_loaders import get_dataset, get_dataloader, DATASET_STATS
 from src.baselines.baseline_methods import get_baseline
 from src.coreset.bcsr_coreset import BCSRCoreset
 from src.models.cnn import CNN_MNIST, CNN_CIFAR
-from src.training.losses import CrossEntropyLoss
+from src.training.losses import cross_entropy_loss
 
 
 def train_model(model, train_loader, val_loader, num_epochs, device, learning_rate=0.001):
