@@ -241,19 +241,21 @@ def run_experiment(args):
         # BCSR方法
         print("使用BCSR方法...")
 
-        # 获取展平的特征用于BCSR
+        # 获取展平的特征用于BCSR（保持在 GPU 上）
         print("提取特征...")
         all_features = []
         all_labels = []
 
         for inputs, labels in train_loader_full:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
             all_features.append(inputs.view(inputs.size(0), -1))
             all_labels.append(labels)
 
-        X_train = torch.cat(all_features, dim=0).numpy()
-        y_train = torch.cat(all_labels, dim=0).numpy()
+        X_train = torch.cat(all_features, dim=0)  # 保持在 GPU
+        y_train = torch.cat(all_labels, dim=0)
 
-        print(f"特征形状: {X_train.shape}")
+        print(f"特征形状: {X_train.shape}, 设备: {X_train.device}")
 
         # 创建BCSR选择器
         coreset_selector = BCSRCoreset(
@@ -265,10 +267,10 @@ def run_experiment(args):
             random_state=args.seed
         )
 
-        # 执行选择
+        # 执行选择（直接传 GPU tensor）
         selected_X, selected_y, info = coreset_selector.coreset_select(
-            X=torch.tensor(X_train),
-            y=torch.tensor(y_train),
+            X=X_train,
+            y=y_train,
             coreset_size=coreset_size,
             model=None  # 使用简化的核方法
         )
