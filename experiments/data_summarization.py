@@ -19,6 +19,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 
@@ -31,10 +32,10 @@ from src.baselines.baseline_methods import get_baseline
 from src.coreset.bcsr_coreset import BCSRCoreset
 from src.models.cnn import CNN_MNIST
 from src.models.resnet import ResNet18
-from src.training.losses import cross_entropy_loss
 
 
-def train_model(model, train_loader, val_loader, num_epochs, device, learning_rate=0.001):
+def train_model(model, train_loader, val_loader, num_epochs, device,
+                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4):
     """
     在dataloader上训练模型
 
@@ -45,13 +46,23 @@ def train_model(model, train_loader, val_loader, num_epochs, device, learning_ra
         num_epochs: 训练轮数
         device: 设备 ('cpu' 或 'cuda')
         learning_rate: 学习率
+        optimizer_type: 优化器类型 ('sgd' 或 'adam')
+        weight_decay: 权重衰减
 
     返回:
         训练历史字典，包含训练和验证损失/准确率
     """
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    if optimizer_type == 'sgd':
+        optimizer = optim.SGD(model.parameters(), lr=learning_rate,
+                              momentum=0.9, weight_decay=weight_decay)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate,
+                               weight_decay=weight_decay)
+
+    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     history = {
         'train_loss': [],
@@ -62,6 +73,7 @@ def train_model(model, train_loader, val_loader, num_epochs, device, learning_ra
     }
 
     best_val_acc = 0.0
+    best_state = None
 
     for epoch in range(num_epochs):
         epoch_start = time.time()
@@ -88,6 +100,9 @@ def train_model(model, train_loader, val_loader, num_epochs, device, learning_ra
 
         train_acc = 100. * train_correct / train_total
         train_loss /= len(train_loader)
+
+        # 更新学习率
+        scheduler.step()
 
         # 验证阶段
         model.eval()
@@ -118,16 +133,23 @@ def train_model(model, train_loader, val_loader, num_epochs, device, learning_ra
         history['val_acc'].append(val_acc)
         history['epoch_time'].append(epoch_time)
 
-        # 保存最佳模型
+        # 保存最佳模型状态
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
         # 打印进度
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f'Epoch: {epoch+1}/{num_epochs} | '
                   f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | '
                   f'Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% | '
+                  f'LR: {scheduler.get_last_lr()[0]:.6f} | '
                   f'Time: {epoch_time:.2f}s')
+
+    # 恢复最佳模型
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        model.to(device)
 
     history['best_val_acc'] = best_val_acc
 
@@ -207,23 +229,30 @@ def run_experiment(args):
     # 限制数据集大小（用于快速实验）
     if args.num_samples is not None:
         print(f"限制训练集大小: {args.num_samples}")
-        indices = torch.randperm(len(train_dataset))[:args.num_samples]
-        train_dataset = Subset(train_dataset, indices)
+        all_indices = torch.randperm(len(train_dataset))[:args.num_samples]
+        train_dataset = Subset(train_dataset, all_indices.tolist())
 
-    # 创建数据加载器
+    # 创建独立的验证集：从训练集中随机抽取10%，使用显式索引保证索引一致性
+    num_train = len(train_dataset)
+    val_ratio = 0.1
+    val_size = int(num_train * val_ratio)
+    perm = torch.randperm(num_train)
+    val_indices = perm[:val_size].tolist()
+    train_indices = perm[val_size:].tolist()
+
+    # 训练子集（排除验证集）
+    train_subset = Subset(train_dataset, train_indices)
+    # 验证子集
+    val_subset = Subset(train_dataset, val_indices)
+
+    # 数据加载器
     train_loader = get_dataloader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    train_loader_noshuffle = get_dataloader(train_dataset, batch_size=args.batch_size, shuffle=False)
+    val_loader = get_dataloader(val_subset, batch_size=args.batch_size, shuffle=False)
     test_loader = get_dataloader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-    # 创建训练集和验证集的分割（用于BCSR）
-    from torch.utils.data import random_split
-    val_size = int(len(train_dataset) * 0.1)
-    train_size = len(train_dataset) - val_size
-    train_subset, val_subset = random_split(train_dataset, [train_size, val_size])
-
-    train_loader_full = get_dataloader(train_subset, batch_size=args.batch_size, shuffle=True)
-    val_loader_small = get_dataloader(val_subset, batch_size=args.batch_size, shuffle=False)
-
-    print(f"训练集大小: {len(train_dataset)}")
+    print(f"训练集大小: {num_train}")
+    print(f"验证集大小: {val_size}")
     print(f"测试集大小: {len(test_dataset)}")
 
     # 计算coreset大小
@@ -242,18 +271,18 @@ def run_experiment(args):
         # BCSR方法
         print("使用BCSR方法...")
 
-        # 获取展平的特征用于BCSR（保持在 GPU 上）
+        # 使用shuffle=False确保特征矩阵的索引与数据集索引一致
         print("提取特征...")
         all_features = []
         all_labels = []
 
-        for inputs, labels in train_loader_full:
+        for inputs, labels in train_loader_noshuffle:
             inputs = inputs.to(device)
             labels = labels.to(device)
             all_features.append(inputs.view(inputs.size(0), -1))
             all_labels.append(labels)
 
-        X_train = torch.cat(all_features, dim=0)  # 保持在 GPU
+        X_train = torch.cat(all_features, dim=0)
         y_train = torch.cat(all_labels, dim=0)
 
         print(f"特征形状: {X_train.shape}, 设备: {X_train.device}")
@@ -282,11 +311,11 @@ def run_experiment(args):
         # 基线方法
         print(f"使用{args.method.upper()}方法...")
 
-        # 获取展平的特征
+        # 使用shuffle=False确保索引一致
         all_features = []
         all_labels = []
 
-        for inputs, labels in train_loader:
+        for inputs, labels in train_loader_noshuffle:
             all_features.append(inputs.view(inputs.size(0), -1))
             all_labels.append(labels)
 
@@ -332,15 +361,17 @@ def run_experiment(args):
     # 创建模型
     print("\n创建模型...")
     if args.dataset == 'MNIST':
-        model = CNN_MNIST(num_classes=num_classes)
         model_factory = lambda num_classes: CNN_MNIST(num_classes=num_classes)
+        optimizer_type = 'adam'
+        lr = args.lr
     elif args.dataset in ['CIFAR10', 'CIFAR100']:
-        model = ResNet18(num_classes=num_classes)
         model_factory = lambda num_classes: ResNet18(num_classes=num_classes)
+        optimizer_type = 'sgd'
+        lr = 0.1
     else:
         raise ValueError(f"不支持的数据集: {args.dataset}")
 
-    model = model.to(device)
+    model = model_factory(num_classes=num_classes).to(device)
 
     # 计算模型参数量
     num_params = sum(p.numel() for p in model.parameters())
@@ -355,10 +386,11 @@ def run_experiment(args):
     history_full = train_model(
         model_full,
         train_loader,
-        val_loader_small,
+        val_loader,
         args.epochs,
         device,
-        args.lr
+        learning_rate=lr,
+        optimizer_type=optimizer_type
     )
 
     test_acc_full = evaluate_model(model_full, test_loader, device)
@@ -373,10 +405,11 @@ def run_experiment(args):
     history_coreset = train_model(
         model_coreset,
         coreset_loader,
-        val_loader_small,
+        val_loader,
         args.epochs,
         device,
-        args.lr
+        learning_rate=lr,
+        optimizer_type=optimizer_type
     )
 
     test_acc_coreset = evaluate_model(model_coreset, test_loader, device)
