@@ -35,11 +35,11 @@ ENV/
 *.ipynb_checkpoints
 
 # Data
-data/
-datasets/
-*.csv
-*.pkl
-*.pickle
+# data/
+# datasets/
+# *.csv
+# *.pkl
+# *.pickle
 
 # Logs and Checkpoints
 logs/
@@ -65,9 +65,9 @@ temp/
 results/
 
 # Model files
-models/
-*.safetensors
-*.bin
+# models/
+# *.safetensors
+# *.bin
 
 # Test files
 test_*.py
