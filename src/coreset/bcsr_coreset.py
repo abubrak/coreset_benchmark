@@ -304,7 +304,7 @@ class BCSRCoreset:
         validation_split: float
     ) -> np.ndarray:
         """
-        使用核方法进行简化的权重优化（GPU 版本）
+        使用核方法进行简化的权重优化（分批 GPU 版本，避免 OOM）
 
         这是一个简化版本，不使用完整的双层优化，而是基于样本的多样性和重要性
 
@@ -339,9 +339,31 @@ class BCSRCoreset:
         # 归一化（PyTorch）
         X_norm = X_flat / (torch.norm(X_flat, dim=1, keepdim=True) + 1e-8)
 
-        # 计算RBF核矩阵（PyTorch，GPU）
+        # 计算RBF核均值（分批计算，避免 OOM）
         gamma = 1.0 / X_flat.shape[1]
-        K = self._compute_rbf_kernel_torch(X_norm, gamma)
+
+        # 分批计算多样性得分：只需要 K.mean(axis=1)，不需要完整矩阵
+        batch_size = 1024
+        diversity_scores = torch.zeros(n_samples, device=device)
+
+        X_norm_sq = torch.sum(X_norm ** 2, dim=1)  # (n,)
+
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+
+            # 计算 dist_sq[start:end, :] = X_sq[start:end, None] + X_sq[None, :] - 2 * X_batch @ X.T
+            batch_sq = X_norm_sq[start:end].unsqueeze(1)  # (batch, 1)
+            all_sq = X_norm_sq.unsqueeze(0)  # (1, n)
+            dot_prod = X_norm[start:end] @ X_norm.T  # (batch, n)
+
+            dist_sq = batch_sq + all_sq - 2.0 * dot_prod
+            dist_sq = torch.clamp(dist_sq, min=0.0)
+
+            # RBF 核
+            K_batch = torch.exp(-gamma * dist_sq)  # (batch, n)
+
+            # 每行的均值
+            diversity_scores[start:end] = K_batch.mean(dim=1)
 
         # 计算类别平衡权重（PyTorch）
         unique_labels = torch.unique(y_t)
@@ -353,9 +375,6 @@ class BCSRCoreset:
         sample_class_weights = torch.zeros(n_samples, device=device)
         for label, weight in zip(unique_labels, class_weights):
             sample_class_weights[y_t == label] = weight
-
-        # 计算多样性权重（基于核矩阵）
-        diversity_scores = K.mean(dim=1)
 
         # 组合权重
         weights = sample_class_weights * diversity_scores
