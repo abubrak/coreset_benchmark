@@ -34,16 +34,8 @@ from src.models.cnn import CNN_MNIST
 from src.models.resnet import ResNet18
 
 
-def set_bn_mode(model, track_running_stats=False):
-    """设置 BatchNorm 的 track_running_stats"""
-    for module in model.modules():
-        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-            module.track_running_stats = track_running_stats
-
-
 def train_model(model, train_loader, val_loader, num_epochs, device,
-                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4,
-                freeze_bn=False):
+                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4):
     """
     在dataloader上训练模型
 
@@ -56,16 +48,11 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
         learning_rate: 学习率
         optimizer_type: 优化器类型 ('sgd' 或 'adam')
         weight_decay: 权重衰减
-        freeze_bn: 是否冻结 BatchNorm 统计量（用于小数据集）
 
     返回:
         训练历史字典，包含训练和验证损失/准确率
     """
     model = model.to(device)
-
-    # 对于小数据集，冻结 BatchNorm 的 running stats
-    if freeze_bn:
-        set_bn_mode(model, track_running_stats=False)
 
     criterion = nn.CrossEntropyLoss()
 
@@ -452,8 +439,7 @@ def run_experiment(args):
         coreset_epochs,
         device,
         learning_rate=coreset_lr,
-        optimizer_type=optimizer_type,
-        freeze_bn=True  # 小 Coreset 冻结 BatchNorm
+        optimizer_type=optimizer_type
     )
 
     test_acc_coreset = evaluate_model(model_coreset, test_loader, device)
