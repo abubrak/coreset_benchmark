@@ -34,8 +34,16 @@ from src.models.cnn import CNN_MNIST
 from src.models.resnet import ResNet18
 
 
+def set_bn_mode(model, track_running_stats=False):
+    """设置 BatchNorm 的 track_running_stats"""
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            module.track_running_stats = track_running_stats
+
+
 def train_model(model, train_loader, val_loader, num_epochs, device,
-                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4):
+                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4,
+                freeze_bn=False):
     """
     在dataloader上训练模型
 
@@ -48,11 +56,17 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
         learning_rate: 学习率
         optimizer_type: 优化器类型 ('sgd' 或 'adam')
         weight_decay: 权重衰减
+        freeze_bn: 是否冻结 BatchNorm 统计量（用于小数据集）
 
     返回:
         训练历史字典，包含训练和验证损失/准确率
     """
     model = model.to(device)
+
+    # 对于小数据集，冻结 BatchNorm 的 running stats
+    if freeze_bn:
+        set_bn_mode(model, track_running_stats=False)
+
     criterion = nn.CrossEntropyLoss()
 
     if optimizer_type == 'sgd':
@@ -223,35 +237,52 @@ def run_experiment(args):
 
     # 加载数据集
     print("\n加载数据集...")
-    train_dataset = get_dataset(args.dataset, train=True, download=True)
+    from torchvision import transforms
+
+    stats = DATASET_STATS.get(args.dataset)
+
+    # 创建无增强的 transform（用于验证和特征提取）
+    transform_noaug = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(stats['mean'], stats['std'])
+    ])
+
+    # 训练集（带数据增强）
+    train_dataset_aug = get_dataset(args.dataset, train=True, download=True)
+    # 训练集（无数据增强，用于验证和特征提取）
+    train_dataset_noaug = get_dataset(args.dataset, train=True, download=True, transform=transform_noaug)
+    # 测试集
     test_dataset = get_dataset(args.dataset, train=False, download=True)
 
     # 限制数据集大小（用于快速实验）
     if args.num_samples is not None:
         print(f"限制训练集大小: {args.num_samples}")
-        all_indices = torch.randperm(len(train_dataset))[:args.num_samples]
-        train_dataset = Subset(train_dataset, all_indices.tolist())
+        all_indices = torch.randperm(len(train_dataset_aug))[:args.num_samples]
+        train_dataset_aug = Subset(train_dataset_aug, all_indices.tolist())
+        train_dataset_noaug = Subset(train_dataset_noaug, all_indices.tolist())
 
-    # 创建独立的验证集：从训练集中随机抽取10%，使用显式索引保证索引一致性
-    num_train = len(train_dataset)
+    # 创建独立的验证集索引：从训练集中随机抽取10%
+    num_train = len(train_dataset_aug)
     val_ratio = 0.1
     val_size = int(num_train * val_ratio)
     perm = torch.randperm(num_train)
     val_indices = perm[:val_size].tolist()
     train_indices = perm[val_size:].tolist()
 
-    # 训练子集（排除验证集）
-    train_subset = Subset(train_dataset, train_indices)
-    # 验证子集
-    val_subset = Subset(train_dataset, val_indices)
+    # 训练子集（带增强，排除验证集）
+    train_subset_aug = Subset(train_dataset_aug, train_indices)
+    # 验证子集（无增强）
+    val_subset = Subset(train_dataset_noaug, val_indices)
+    # 特征提取用完整训练集（无增强，shuffle=False 保证索引一致）
+    train_dataset_for_features = train_dataset_noaug
 
     # 数据加载器
-    train_loader = get_dataloader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    train_loader_noshuffle = get_dataloader(train_dataset, batch_size=args.batch_size, shuffle=False)
+    train_loader = get_dataloader(train_subset_aug, batch_size=args.batch_size, shuffle=True)
+    train_loader_noshuffle = get_dataloader(train_dataset_for_features, batch_size=args.batch_size, shuffle=False)
     val_loader = get_dataloader(val_subset, batch_size=args.batch_size, shuffle=False)
     test_loader = get_dataloader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-    print(f"训练集大小: {num_train}")
+    print(f"训练集大小: {len(train_subset_aug)}")
     print(f"验证集大小: {val_size}")
     print(f"测试集大小: {len(test_dataset)}")
 
@@ -402,14 +433,26 @@ def run_experiment(args):
     print("=" * 80)
 
     model_coreset = model_factory(num_classes=num_classes).to(device)
+
+    # 小 Coreset 调整超参数
+    is_small_coreset = coreset_size < 1000
+    if is_small_coreset:
+        coreset_lr = lr * 0.1  # 降低学习率
+        coreset_epochs = args.epochs * 2  # 增加训练轮数
+        print(f"小 Coreset 检测：调整学习率 {lr:.3f} -> {coreset_lr:.3f}，轮数 {args.epochs} -> {coreset_epochs}")
+    else:
+        coreset_lr = lr
+        coreset_epochs = args.epochs
+
     history_coreset = train_model(
         model_coreset,
         coreset_loader,
         val_loader,
-        args.epochs,
+        coreset_epochs,
         device,
-        learning_rate=lr,
-        optimizer_type=optimizer_type
+        learning_rate=coreset_lr,
+        optimizer_type=optimizer_type,
+        freeze_bn=True  # 小 Coreset 冻结 BatchNorm
     )
 
     test_acc_coreset = evaluate_model(model_coreset, test_loader, device)
