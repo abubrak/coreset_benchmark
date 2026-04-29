@@ -409,7 +409,7 @@ def run_experiment(args):
 
         selected_indices = info['selected_indices']
 
-    elif args.method in ['random', 'kcenter', 'kmeans', 'herding']:
+    elif args.method in ['uniform', 'kcenter', 'kmeans', 'herding']:
         # 基线方法
         print(f"使用{args.method.upper()}方法...")
 
@@ -613,7 +613,7 @@ def main():
 
     # Coreset参数
     parser.add_argument('--method', type=str, default='herding',
-                       choices=['random', 'kcenter', 'kmeans', 'herding', 'bcsr'],
+                       choices=['uniform', 'kcenter', 'kmeans', 'herding', 'bcsr'],
                        help='Coreset选择方法')
     parser.add_argument('--selection_ratio', type=float, default=0.1,
                        help='Coreset选择比例')
