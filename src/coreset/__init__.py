@@ -2,6 +2,7 @@
 
 from .bilevel_coreset import BilevelCoreset
 from .csrel_coreset import CSReLCoreset
+from .csrel_coreset_v2 import CSReLCoresetV2
 from .selection_functions import (
     select_by_loss_diff,
     select_by_margin,
@@ -32,6 +33,7 @@ from .csrel_train import (
 __all__ = [
     'BilevelCoreset',
     'CSReLCoreset',
+    'CSReLCoresetV2',
     'select_by_loss_diff',
     'select_by_margin',
     'select_by_gradient_norm',
