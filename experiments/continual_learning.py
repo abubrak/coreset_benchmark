@@ -37,6 +37,9 @@ from src.coreset.selection_functions import (
     select_by_margin,
     select_by_gradient_norm
 )
+from src.coreset.continual_adapters import (
+    BCSRContinualAdapter
+)
 
 
 class CoresetBuffer:
@@ -213,7 +216,8 @@ class CoresetBuffer:
         labels: torch.Tensor,
         num_samples: int,
         method: str = "random",
-        model: Optional[nn.Module] = None
+        model: Optional[nn.Module] = None,
+        task_id: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         从数据中选择coreset样本
@@ -222,8 +226,10 @@ class CoresetBuffer:
             data: 输入数据
             labels: 标签
             num_samples: 要选择的样本数
-            method: 选择方法
-            model: 用于基于模型的选择方法
+            method: 选择方法 ('random', 'uniform', 'loss', 'margin', 'gradient',
+                               'bcsr', 'csrel', 'bilevel')
+            model: 用于基于模型的选择方法（BCSR/CSReL/Bilevel需要）
+            task_id: 任务ID，用于配置不同方法的参数
 
         返回:
             选择的样本和标签
@@ -285,6 +291,31 @@ class CoresetBuffer:
                         )
 
                 indices = indices.to(data.device)
+
+        elif method == "bcsr":
+            # BCSR (Bilevel Coreset Selection with Reweighting)
+            if model is None:
+                raise ValueError("BCSR method requires a model")
+
+            # Create adapter with default parameters
+            adapter = BCSRContinualAdapter(
+                learning_rate_inner=0.01,
+                learning_rate_outer=5.0,
+                num_inner_steps=1,
+                num_outer_steps=5,
+                beta=0.1,
+                device=data.device
+            )
+
+            selected_data, selected_labels = adapter.select(
+                data=data,
+                labels=labels,
+                num_samples=num_samples,
+                model=model
+            )
+
+            # Return directly (already tensors)
+            return selected_data, selected_labels
 
         else:
             raise ValueError(f"Unknown selection method: {method}")
@@ -853,7 +884,8 @@ def main():
     parser.add_argument('--memory_size', type=int, default=2000,
                        help='经验回放缓冲区大小')
     parser.add_argument('--selection_method', type=str, default='random',
-                       choices=['random', 'uniform', 'loss', 'margin', 'gradient'],
+                       choices=['random', 'uniform', 'loss', 'margin', 'gradient',
+                               'bcsr'],
                        help='Coreset选择方法')
 
     # 其他参数
