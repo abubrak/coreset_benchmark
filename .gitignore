@@ -70,4 +70,4 @@ results/
 # *.bin
 
 # Test files
-test_*.py
+# test_*.py  # Commented out to allow tests/ directory to be tracked
