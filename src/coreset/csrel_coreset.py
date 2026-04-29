@@ -244,7 +244,7 @@ class CSReLCoreset:
             Training labels of shape (n_samples,).
         model : nn.Module, optional
             Current model to compute current losses, by default None.
-            If None, uses the reference model for both.
+            If None, raises ValueError (use reference_model for both defeats the purpose).
         incremental : bool, optional
             Whether to perform incremental selection, by default False.
             If True, adds new samples to existing selection.
@@ -262,6 +262,7 @@ class CSReLCoreset:
         ------
         ValueError
             If reference model has not been trained.
+            If model is None (a different model is required for reducible loss).
             If incremental=True but current_indices is None.
         """
         if self.reference_model is None or self.reference_losses is None:
@@ -270,15 +271,22 @@ class CSReLCoreset:
                 "Call train_reference_model() before select()."
             )
 
+        # 新增：输入验证 - model 不能为 None
+        if model is None:
+            raise ValueError(
+                "A model must be provided for CSReL selection. "
+                "Using the reference model as both reference and current model "
+                "would make reducible loss zero for all samples, defeating the purpose "
+                "of the selection method. Please provide a different model "
+                "(e.g., randomly initialized or partially trained)."
+            )
+
         # Move data to device
         train_data = train_data.to(self.device)
         train_labels = train_labels.to(self.device)
 
         # Determine which model to use for current losses
-        if model is not None:
-            current_model = model.to(self.device)
-        else:
-            current_model = self.reference_model
+        current_model = model.to(self.device)
 
         # Compute current losses
         current_model.eval()
