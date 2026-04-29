@@ -268,17 +268,19 @@ class CoresetBuffer:
                 indices = torch.randperm(n_total)[:num_samples]
             else:
                 model.eval()
-                with torch.no_grad():
-                    if method == "loss":
-                        # 基于损失选择
+
+                if method == "loss":
+                    # 基于损失选择（不需要梯度）
+                    with torch.no_grad():
                         outputs = model(data)
                         losses = nn.functional.cross_entropy(
                             outputs, labels, reduction='none'
                         )
                         _, indices = torch.topk(losses, num_samples)
 
-                    elif method == "margin":
-                        # 基于margin选择
+                elif method == "margin":
+                    # 基于margin选择（不需要梯度）
+                    with torch.no_grad():
                         outputs = model(data)
                         from src.coreset.selection_functions import select_by_margin
                         indices = select_by_margin(
@@ -286,12 +288,12 @@ class CoresetBuffer:
                             class_balance=True, num_classes=labels.max().item()+1
                         )
 
-                    elif method == "gradient":
-                        # 基于梯度范数选择
-                        indices = select_by_gradient_norm(
-                            model, data, labels, num_samples,
-                            class_balance=True, num_classes=labels.max().item()+1
-                        )
+                elif method == "gradient":
+                    # 基于梯度范数选择（需要梯度！）
+                    indices = select_by_gradient_norm(
+                        model, data, labels, num_samples,
+                        class_balance=True, num_classes=labels.max().item()+1
+                    )
 
                 indices = indices.to(data.device)
 

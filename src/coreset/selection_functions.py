@@ -238,7 +238,12 @@ def select_by_gradient_norm(
             f"Cannot select {num_samples} samples from {n_total} samples"
         )
 
-    model.eval()
+    # Enable gradients for all model parameters
+    was_training = model.training
+    model.train()
+    for param in model.parameters():
+        param.requires_grad_(True)
+
     gradient_norms = []
 
     # Compute gradient norm for each sample
@@ -252,10 +257,10 @@ def select_by_gradient_norm(
         output = model(x)
         loss = torch.nn.functional.cross_entropy(output, y)
 
-        # Backward pass
-        loss.backward()
+        # Backward pass (retain graph to handle potential issues)
+        loss.backward(retain_graph=True)
 
-        # Compute gradient norm
+        # Compute gradient norm from model parameters
         grad_norm = 0.0
         for param in model.parameters():
             if param.grad is not None:
@@ -263,6 +268,9 @@ def select_by_gradient_norm(
         grad_norm = grad_norm ** 0.5
 
         gradient_norms.append(grad_norm)
+
+    # Restore original training mode
+    model.train(was_training)
 
     gradient_norms = torch.stack(gradient_norms)
 
