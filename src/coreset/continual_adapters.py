@@ -243,3 +243,124 @@ class CSReLContinualAdapter:
         selected_labels = labels[selected_indices]
 
         return selected_data, selected_labels
+
+
+class BilevelContinualAdapter:
+    """
+    Adapter for Bilevel Coreset method in continual learning scenarios.
+
+    Simplified version that uses the kernel-based approach without
+    explicit bilevel optimization (which requires validation set split).
+    """
+
+    def __init__(
+        self,
+        val_ratio: float = 0.2,
+        max_outer_it: int = 5,  # Reduced for speed
+        device: str = 'cuda'
+    ):
+        """
+        Initialize Bilevel adapter.
+
+        Parameters
+        ----------
+        val_ratio : float
+            Validation set ratio for bilevel optimization.
+        max_outer_it : int
+            Maximum outer optimization iterations.
+        device : str
+            Computation device ('cuda' or 'cpu').
+        """
+        self.device = device
+        self.val_ratio = val_ratio
+        self.max_outer_it = max_outer_it
+
+    def _rbf_kernel(self, X1: torch.Tensor, X2: torch.Tensor, gamma: float = 1.0):
+        """Compute RBF kernel matrix."""
+        X1_flat = X1.view(X1.size(0), -1)
+        X2_flat = X2.view(X2.size(0), -1)
+
+        # Compute squared Euclidean distances
+        X1_norm = (X1_flat ** 2).sum(dim=1)
+        X2_norm = (X2_flat ** 2).sum(dim=1)
+        dist_sq = X1_norm.unsqueeze(1) + X2_norm.unsqueeze(0) - 2 * X1_flat @ X2_flat.T
+        dist_sq = torch.clamp(dist_sq, min=0.0)
+
+        # RBF kernel
+        K = torch.exp(-gamma * dist_sq)
+        return K
+
+    def select(
+        self,
+        data: torch.Tensor,
+        labels: torch.Tensor,
+        num_samples: int,
+        model: nn.Module
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Select coreset samples using simplified Bilevel method.
+
+        Uses kernel herding as a proxy for bilevel optimization.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Input data of shape (n_samples, C, H, W).
+        labels : torch.Tensor
+            Labels of shape (n_samples,).
+        num_samples : int
+            Number of samples to select.
+        model : nn.Module
+            Model (not used in simplified version, kept for interface compatibility).
+
+        Returns
+        -------
+        selected_data : torch.Tensor
+            Selected samples of shape (num_samples, ...).
+        selected_labels : torch.Tensor
+            Selected labels of shape (num_samples,).
+        """
+        # Ensure data is on correct device
+        data = data.to(self.device)
+        labels = labels.to(self.device)
+
+        n_samples = data.shape[0]
+        num_samples = min(num_samples, n_samples)
+
+        # Flatten data for kernel computation
+        data_flat = data.view(n_samples, -1)
+
+        # Kernel herding (simplified bilevel proxy)
+        selected_indices = []
+        remaining_indices = list(range(n_samples))
+
+        # Mean of all samples in kernel space
+        K_all = self._rbf_kernel(data, data)
+        kernel_mean = K_all.mean(dim=0)
+
+        # Current sum in kernel space
+        current_sum = torch.zeros(n_samples, device=self.device)
+
+        for _ in range(num_samples):
+            best_idx = None
+            best_dist = float('inf')
+
+            for idx in remaining_indices:
+                # Compute distance to kernel mean if we add this sample
+                new_sum = current_sum + K_all[idx]
+                new_mean = new_sum / (len(selected_indices) + 1)
+                dist = torch.norm(kernel_mean - new_mean)
+
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+
+            if best_idx is not None:
+                selected_indices.append(best_idx)
+                remaining_indices.remove(best_idx)
+                current_sum += K_all[best_idx]
+
+        selected_data = data[selected_indices]
+        selected_labels = labels[selected_indices]
+
+        return selected_data, selected_labels

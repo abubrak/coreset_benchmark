@@ -11,7 +11,7 @@ import os
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.coreset.continual_adapters import BCSRContinualAdapter
+from src.coreset.continual_adapters import BCSRContinualAdapter, BilevelContinualAdapter
 
 
 class SimpleCNN(nn.Module):
@@ -126,6 +126,34 @@ def test_csrel_adapter_select(sample_data, sample_model, csrel_adapter, device):
     # Check output shapes
     assert selected_data.shape[0] <= num_samples  # CSReL uses ratio
     assert selected_labels.shape[0] == selected_data.shape[0]
+    assert selected_data.device.type == device
+    assert selected_labels.device.type == device
+
+
+@pytest.fixture
+def bilevel_adapter(device):
+    """Create Bilevel adapter for testing."""
+    return BilevelContinualAdapter(
+        max_outer_it=2,  # Reduced for testing
+        device=device
+    )
+
+
+def test_bilevel_adapter_select(sample_data, sample_model, bilevel_adapter, device):
+    """Test Bilevel adapter can select samples."""
+    data, labels = sample_data
+
+    num_samples = 20
+    selected_data, selected_labels = bilevel_adapter.select(
+        data=data,
+        labels=labels,
+        num_samples=num_samples,
+        model=sample_model
+    )
+
+    # Check output shapes
+    assert selected_data.shape[0] == num_samples
+    assert selected_labels.shape[0] == num_samples
     assert selected_data.device.type == device
     assert selected_labels.device.type == device
 
