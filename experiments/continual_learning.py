@@ -39,7 +39,8 @@ from src.coreset.selection_functions import (
 )
 # Import coreset adapters (CSReL and Bilevel adapters will be added in Tasks 3 and 5)
 from src.coreset.continual_adapters import (
-    BCSRContinualAdapter
+    BCSRContinualAdapter,
+    CSReLContinualAdapter
 )
 
 
@@ -305,6 +306,31 @@ class CoresetBuffer:
                 num_inner_steps=1,
                 num_outer_steps=5,
                 beta=0.1,
+                device=data.device
+            )
+
+            selected_data, selected_labels = adapter.select(
+                data=data,
+                labels=labels,
+                num_samples=num_samples,
+                model=model
+            )
+
+            # Return directly (already tensors)
+            return selected_data, selected_labels
+
+        elif method == "csrel":
+            # CSReL (Classwise Spatial Representation Learning)
+            if model is None:
+                raise ValueError("CSReL method requires a model")
+
+            # Create adapter with default parameters
+            adapter = CSReLContinualAdapter(
+                num_epochs=20,  # Reduced for faster training
+                learning_rate=0.001,
+                batch_size=128,
+                selection_ratio=num_samples / len(data),
+                class_balance=True,
                 device=data.device
             )
 
@@ -886,7 +912,7 @@ def main():
                        help='经验回放缓冲区大小')
     parser.add_argument('--selection_method', type=str, default='random',
                        choices=['random', 'uniform', 'loss', 'margin', 'gradient',
-                               'bcsr'],
+                               'bcsr', 'csrel'],
                        help='Coreset选择方法')
 
     # 其他参数
