@@ -18,6 +18,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
@@ -328,7 +329,11 @@ def run_experiment(args):
 
         # 先在训练集上预训练特征提取器（少量 epoch 即可获得有区分力的特征）
         print("预训练特征提取器...")
-        feat_model = ResNet18(num_classes=num_classes).to(device)
+        # 为MNIST使用CNN_MNIST，为CIFAR使用ResNet18
+        if args.dataset == 'MNIST':
+            feat_model = CNN_MNIST(num_classes=num_classes).to(device)
+        else:
+            feat_model = ResNet18(num_classes=num_classes).to(device)
         feat_optimizer = optim.SGD(feat_model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
         feat_criterion = nn.CrossEntropyLoss()
         feat_model.train()
@@ -346,9 +351,27 @@ def run_experiment(args):
 
         # 提取深度特征
         print("提取深度特征...")
-        feature_extractor = feat_model
-        feature_extractor.fc = nn.Identity()
-        feature_extractor.eval()
+        # 定义特征提取函数
+        if args.dataset == 'MNIST':
+            def extract_features(model, x):
+                # 第一个卷积块
+                x = F.relu(model.bn1(model.conv1(x)))
+                x = model.pool(x)
+                # 第二个卷积块
+                x = F.relu(model.bn2(model.conv2(x)))
+                x = model.pool(x)
+                # 第三个卷积块
+                x = F.relu(model.bn3(model.conv3(x)))
+                x = model.pool(x)
+                # 展平
+                x = x.view(x.size(0), -1)
+                return x
+        else:
+            def extract_features(model, x):
+                model.fc = nn.Identity()
+                return model(x)
+
+        feat_model.eval()
 
         all_features = []
         all_labels = []
@@ -357,7 +380,7 @@ def run_experiment(args):
             for inputs, labels in train_loader_noshuffle:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
-                features = feature_extractor(inputs)
+                features = extract_features(feat_model, inputs)
                 all_features.append(features)
                 all_labels.append(labels)
 
@@ -392,8 +415,28 @@ def run_experiment(args):
 
         # 使用深度特征（与BCSR一致）
         print("提取深度特征...")
-        feature_extractor = ResNet18(num_classes=num_classes).to(device)
-        feature_extractor.fc = nn.Identity()
+        # 为MNIST使用CNN_MNIST，为CIFAR使用ResNet18
+        if args.dataset == 'MNIST':
+            feature_extractor = CNN_MNIST(num_classes=num_classes).to(device)
+            # 对于MNIST，使用fc1之前的特征（在ReLU之前）
+            def extract_features(model, x):
+                # 第一个卷积块
+                x = F.relu(model.bn1(model.conv1(x)))
+                x = model.pool(x)
+                # 第二个卷积块
+                x = F.relu(model.bn2(model.conv2(x)))
+                x = model.pool(x)
+                # 第三个卷积块
+                x = F.relu(model.bn3(model.conv3(x)))
+                x = model.pool(x)
+                # 展平
+                x = x.view(x.size(0), -1)
+                return x
+        else:
+            feature_extractor = ResNet18(num_classes=num_classes).to(device)
+            feature_extractor.fc = nn.Identity()
+            def extract_features(model, x):
+                return model(x)
         feature_extractor.eval()
 
         all_features = []
@@ -402,7 +445,7 @@ def run_experiment(args):
         with torch.no_grad():
             for inputs, labels in train_loader_noshuffle:
                 inputs = inputs.to(device)
-                features = feature_extractor(inputs)
+                features = extract_features(feature_extractor, inputs)
                 all_features.append(features.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
 

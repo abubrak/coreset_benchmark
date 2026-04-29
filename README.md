@@ -49,6 +49,16 @@ coreset_indices = selector.select(train_data, train_labels)
 - **Data Summarization**: Herding and Class Representative Apportionment (CRA)
 - **Continual Learning**: GSS (Gradient-based Sample Selection) and other baselines
 
+## Coreset训练机制
+
+本框架复现了原始论文的**tile重复机制**：
+
+1. **样本重复**: 小coreset（如200样本）通过 `np.tile` 重复 ~250 次，使每epoch样本数 ≈ 50,000
+2. **数据增强**: RandomCrop + RandomHorizontalFlip 使每次重复产生不同变体
+3. **优化器配置**: Adam(lr=5e-5, weight_decay=1e-4) + 6 epochs
+
+这确保了小coreset的训练迭代次数与完整数据集相当，同时通过数据增强防止过拟合。
+
 ## Citation
 
 If you use this code, please cite:
