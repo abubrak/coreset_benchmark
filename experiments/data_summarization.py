@@ -501,6 +501,8 @@ def run_experiment(args):
     # tile重复+数据增强+Adam(5e-5)+6 epochs
     coreset_epochs = 6
     coreset_weight_decay = 1e-4
+    coreset_label_smoothing = 0.0
+    coreset_warmup_epochs = 0
 
     print(f"Coreset 训练配置：{coreset_epochs} epochs, Adam(5e-5), "
           f"weight_decay={coreset_weight_decay}, tile重复机制")
