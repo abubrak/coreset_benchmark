@@ -31,8 +31,28 @@ sys.path.insert(0, str(project_root))
 from src.datasets.data_loaders import get_dataset, get_dataloader, DATASET_STATS, get_coreset_train_loader
 from src.baselines.baseline_methods import get_baseline
 from src.coreset.bcsr_coreset import BCSRCoreset
+from src.coreset.csrel_coreset_v2 import CSReLCoresetV2
+from src.configs import CSReLConfigV2
 from src.models.cnn import CNN_MNIST
 from src.models.resnet import ResNet18
+
+
+class CSReLWrapperDataset(torch.utils.data.Dataset):
+    """
+    将标准 PyTorch 数据集包装为 CSReL v2 期望的格式
+
+    将 (sample, label) 格式转换为 (id, sample, label) 格式
+    """
+
+    def __init__(self, base_dataset):
+        self.base_dataset = base_dataset
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        sample, label = self.base_dataset[idx]
+        return idx, sample, label
 
 
 def train_model(model, train_loader, val_loader, num_epochs, device,
@@ -410,6 +430,70 @@ def run_experiment(args):
 
         selected_indices = info['selected_indices']
 
+    elif args.method == 'csrel_v2':
+        # CSReL v2 方法
+        print("使用CSReL v2方法...")
+
+        # 创建模型
+        if args.dataset == 'MNIST':
+            model = CNN_MNIST(num_classes=num_classes).to(device)
+        else:
+            model = ResNet18(num_classes=num_classes).to(device)
+
+        # 准备训练数据（转换为numpy数组）
+        print("准备训练数据...")
+        all_data = []
+        all_labels = []
+
+        for inputs, labels in train_loader_noshuffle:
+            all_data.append(inputs.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+        X_train = np.concatenate(all_data, axis=0)
+        y_train = np.concatenate(all_labels, axis=0)
+
+        print(f"数据形状: {X_train.shape}, 标签形状: {y_train.shape}")
+
+        # 创建 CSReL v2 配置
+        csrel_config = CSReLConfigV2(
+            dataset=args.dataset,
+            num_classes=num_classes,
+            coreset_size=coreset_size,
+            incremental_size=args.csrel_selection_steps,
+            init_size=args.csrel_init_size,
+            ref_epochs=args.csrel_ref_epochs,
+            ref_lr=args.csrel_ref_lr,
+            ref_opt_type='sgd',
+            inc_epochs=args.csrel_cur_steps,
+            inc_lr=args.csrel_cur_lr,
+            inc_opt_type='sgd',
+            batch_size=args.batch_size,
+            use_cuda=(device == 'cuda'),
+            device=device.type,
+            temp_dir='./temp_csrel_v2'
+        )
+
+        # 包装数据集为 CSReL v2 格式
+        wrapped_dataset = CSReLWrapperDataset(train_subset_noaug)
+
+        # 创建 CSReL v2 选择器
+        print("创建CSReL v2选择器...")
+        coreset_selector = CSReLCoresetV2(
+            model=model,
+            full_dataset=wrapped_dataset,
+            config=csrel_config,
+            full_x=X_train,
+            full_y=y_train
+        )
+
+        # 执行选择
+        print("执行CSReL v2选择...")
+        selected_indices = coreset_selector.select()
+
+        # 确保索引在有效范围内并转换为numpy数组
+        selected_indices = np.array([idx for idx in selected_indices if 0 <= idx < len(train_subset_noaug)])
+        print(f"CSReL v2选择完成! 选择了 {len(selected_indices)} 个样本")
+
     elif args.method in ['uniform', 'kcenter', 'kmeans', 'herding']:
         # 基线方法
         print(f"使用{args.method.upper()}方法...")
@@ -614,7 +698,7 @@ def main():
 
     # Coreset参数
     parser.add_argument('--method', type=str, default='herding',
-                       choices=['uniform', 'kcenter', 'kmeans', 'herding', 'bcsr'],
+                       choices=['uniform', 'kcenter', 'kmeans', 'herding', 'bcsr', 'csrel_v2'],
                        help='Coreset选择方法')
     parser.add_argument('--selection_ratio', type=float, default=0.1,
                        help='Coreset选择比例')
@@ -630,6 +714,20 @@ def main():
                        help='BCSR外层优化步数 (默认: 5)')
     parser.add_argument('--bcsr_beta', type=float, default=0.1,
                        help='BCSR正则化系数beta (默认: 0.1)')
+
+    # CSReL v2特定参数
+    parser.add_argument('--csrel_init_size', type=int, default=100,
+                       help='CSReL v2初始随机采样大小 (默认: 100)')
+    parser.add_argument('--csrel_selection_steps', type=int, default=100,
+                       help='CSReL v2每轮增量选择的大小 (默认: 100)')
+    parser.add_argument('--csrel_cur_lr', type=float, default=0.01,
+                       help='CSReL v2增量训练学习率 (默认: 0.01)')
+    parser.add_argument('--csrel_cur_steps', type=int, default=10,
+                       help='CSReL v2增量训练轮数 (默认: 10)')
+    parser.add_argument('--csrel_ref_epochs', type=int, default=100,
+                       help='CSReL v2参考模型训练轮数 (默认: 100)')
+    parser.add_argument('--csrel_ref_lr', type=float, default=0.01,
+                       help='CSReL v2参考模型学习率 (默认: 0.01)')
 
     # 训练参数
     parser.add_argument('--epochs', type=int, default=50,
