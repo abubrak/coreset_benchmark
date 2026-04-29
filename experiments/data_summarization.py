@@ -35,7 +35,9 @@ from src.models.resnet import ResNet18
 
 
 def train_model(model, train_loader, val_loader, num_epochs, device,
-                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4):
+                learning_rate=0.1, optimizer_type='sgd', weight_decay=5e-4,
+                label_smoothing=0.0, warmup_epochs=0, use_mixup=False,
+                is_coreset=False):
     """
     在dataloader上训练模型
 
@@ -48,22 +50,35 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
         learning_rate: 学习率
         optimizer_type: 优化器类型 ('sgd' 或 'adam')
         weight_decay: 权重衰减
+        label_smoothing: 标签平滑系数 (0.0-0.2)
+        warmup_epochs: 学习率预热轮数
+        use_mixup: 是否使用 MixUp 数据增强
+        is_coreset: 是否使用coreset优化器配置 (Adam lr=5e-5, 无scheduler)
 
     返回:
         训练历史字典，包含训练和验证损失/准确率
     """
     model = model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
-    if optimizer_type == 'sgd':
-        optimizer = optim.SGD(model.parameters(), lr=learning_rate,
-                              momentum=0.9, weight_decay=weight_decay)
+    # is_coreset模式：使用Adam(5e-5)与小学习率，与原始resnet_cifar.py一致
+    if is_coreset:
+        optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=weight_decay)
+        scheduler = None  # 固定学习率，不使用scheduler
     else:
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate,
-                               weight_decay=weight_decay)
+        # 原有逻辑保持不变
+        if optimizer_type == 'sgd':
+            optimizer = optim.SGD(model.parameters(), lr=learning_rate,
+                                  momentum=0.9, weight_decay=weight_decay)
+        else:
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate,
+                                   weight_decay=weight_decay)
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
+        scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+    # Mixup alpha 参数
+    mixup_alpha = 1.0 if use_mixup else 0.0
 
     history = {
         'train_loss': [],
@@ -79,6 +94,15 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
     for epoch in range(num_epochs):
         epoch_start = time.time()
 
+        # Warmup 学习率调整
+        if warmup_epochs > 0 and epoch < warmup_epochs:
+            warmup_lr = learning_rate * (epoch + 1) / warmup_epochs
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_lr
+            current_lr = warmup_lr
+        else:
+            current_lr = optimizer.param_groups[0]['lr']
+
         # 训练阶段
         model.train()
         train_loss = 0.0
@@ -88,9 +112,20 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.to(device), targets.to(device)
 
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            # Mixup 数据增强（可选）
+            if use_mixup and mixup_alpha > 0:
+                lam = np.random.beta(mixup_alpha, mixup_alpha)
+                batch_size = inputs.size(0)
+                index = torch.randperm(batch_size).to(device)
+                mixed_inputs = lam * inputs + (1 - lam) * inputs[index]
+                targets_a, targets_b = targets, targets[index]
+                outputs = model(mixed_inputs)
+                loss = lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
+            else:
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+
             loss.backward()
             optimizer.step()
 
@@ -102,8 +137,10 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
         train_acc = 100. * train_correct / train_total
         train_loss /= len(train_loader)
 
-        # 更新学习率
-        scheduler.step()
+        # 更新学习率（warmup 后才开始 scheduler）
+        if scheduler is not None:
+            if warmup_epochs == 0 or epoch >= warmup_epochs:
+                scheduler.step()
 
         # 验证阶段
         model.eval()
@@ -144,7 +181,7 @@ def train_model(model, train_loader, val_loader, num_epochs, device,
             print(f'Epoch: {epoch+1}/{num_epochs} | '
                   f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | '
                   f'Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% | '
-                  f'LR: {scheduler.get_last_lr()[0]:.6f} | '
+                  f'LR: {current_lr:.6f} | '
                   f'Time: {epoch_time:.2f}s')
 
     # 恢复最佳模型
@@ -289,11 +326,27 @@ def run_experiment(args):
         # BCSR方法
         print("使用BCSR方法...")
 
-        # 使用深度特征提取（基于随机初始化的ResNet）
+        # 先在训练集上预训练特征提取器（少量 epoch 即可获得有区分力的特征）
+        print("预训练特征提取器...")
+        feat_model = ResNet18(num_classes=num_classes).to(device)
+        feat_optimizer = optim.SGD(feat_model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+        feat_criterion = nn.CrossEntropyLoss()
+        feat_model.train()
+        pretrain_epochs = 10  # 10 epoch 足以学到有意义的特征表示
+        for ep in range(pretrain_epochs):
+            for inputs, labels in train_loader:
+                inputs, targets = inputs.to(device), labels.to(device)
+                feat_optimizer.zero_grad()
+                outputs = feat_model(inputs)
+                loss = feat_criterion(outputs, targets)
+                loss.backward()
+                feat_optimizer.step()
+            if (ep + 1) % 5 == 0:
+                print(f"  特征预训练 epoch {ep+1}/{pretrain_epochs}")
+
+        # 提取深度特征
         print("提取深度特征...")
-        # 创建临时特征提取器
-        feature_extractor = ResNet18(num_classes=num_classes).to(device)
-        # 移除最后的分类层，获取倒数第二层特征
+        feature_extractor = feat_model
         feature_extractor.fc = nn.Identity()
         feature_extractor.eval()
 
@@ -304,7 +357,6 @@ def run_experiment(args):
             for inputs, labels in train_loader_noshuffle:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
-                # 提取深度特征 (512维)
                 features = feature_extractor(inputs)
                 all_features.append(features)
                 all_labels.append(labels)
@@ -439,15 +491,36 @@ def run_experiment(args):
 
     model_coreset = model_factory(num_classes=num_classes).to(device)
 
-    # 小 Coreset 调整超参数
-    is_small_coreset = coreset_size < 1000
-    if is_small_coreset:
-        coreset_lr = lr * 0.1  # 降低学习率
-        coreset_epochs = args.epochs * 2  # 增加训练轮数
-        print(f"小 Coreset 检测：调整学习率 {lr:.3f} -> {coreset_lr:.3f}，轮数 {args.epochs} -> {coreset_epochs}")
+    # Coreset 超参数自适应调整
+    # Coreset 样本少，需要更低学习率和更强正则化
+    coreset_lr = lr * max(0.1, min(1.0, coreset_size / len(train_subset_aug)))
+    coreset_epochs = args.epochs
+    coreset_weight_decay = 5e-4
+
+    if coreset_size < 5000:
+        # 小样本集：显著降低学习率，增强正则化
+        coreset_lr = lr * 0.01
+        coreset_weight_decay = 5e-3  # 10x 更强的 weight decay
+        coreset_label_smoothing = 0.1  # 标签平滑防止过拟合
+        coreset_warmup_epochs = 5  # Warmup 稳定早期训练
+        print(f"Coreset 调整：学习率 {lr:.3f} -> {coreset_lr:.3f}，"
+              f"weight_decay 5e-4 -> {coreset_weight_decay}，"
+              f"label_smoothing=0.1，warmup_epochs=5")
+
+    # 计算每类平均样本数
+    samples_per_class = coreset_size / num_classes
+    if samples_per_class < 50:
+        # 每类样本极少时使用 Adam（对小样本更稳定）
+        coreset_optimizer_type = 'adam'
+        coreset_lr = 0.001  # Adam 默认学习率
+        coreset_label_smoothing = 0.15  # 更强的标签平滑
+        coreset_warmup_epochs = 10  # 更长的 warmup
+        print(f"极小 Coreset（{samples_per_class:.0f}样本/类）：切换到 Adam，lr={coreset_lr}，"
+              f"label_smoothing={coreset_label_smoothing}，warmup={coreset_warmup_epochs}")
     else:
-        coreset_lr = lr
-        coreset_epochs = args.epochs
+        coreset_optimizer_type = optimizer_type
+        coreset_label_smoothing = 0.0
+        coreset_warmup_epochs = 0
 
     history_coreset = train_model(
         model_coreset,
@@ -456,7 +529,10 @@ def run_experiment(args):
         coreset_epochs,
         device,
         learning_rate=coreset_lr,
-        optimizer_type=optimizer_type
+        optimizer_type=coreset_optimizer_type,
+        weight_decay=coreset_weight_decay,
+        label_smoothing=coreset_label_smoothing,
+        warmup_epochs=coreset_warmup_epochs
     )
 
     test_acc_coreset = evaluate_model(model_coreset, test_loader, device)
