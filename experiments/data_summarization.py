@@ -27,7 +27,7 @@ import numpy as np
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.datasets.data_loaders import get_dataset, get_dataloader, DATASET_STATS
+from src.datasets.data_loaders import get_dataset, get_dataloader, DATASET_STATS, get_coreset_train_loader
 from src.baselines.baseline_methods import get_baseline
 from src.coreset.bcsr_coreset import BCSRCoreset
 from src.models.cnn import CNN_MNIST
@@ -439,12 +439,18 @@ def run_experiment(args):
     print(f"选择完成! 用时: {selection_time:.2f}秒")
     print(f"选择的样本数: {len(selected_indices)}")
 
-    # 创建coreset数据集
+    # 创建coreset训练DataLoader（使用tile重复机制）
     # selected_indices 是 train_subset_noaug 的局部索引，映射到 train_subset_aug
-    coreset_dataset = Subset(train_subset_aug, selected_indices)
-    coreset_loader = get_dataloader(coreset_dataset, batch_size=args.batch_size, shuffle=True)
+    coreset_loader = get_coreset_train_loader(
+        train_dataset=train_subset_aug,
+        indices=selected_indices,
+        coreset_size=coreset_size,
+        dataset_name=args.dataset,
+        batch_size=args.batch_size,
+        num_workers=2,
+    )
 
-    print(f"Coreset数据集大小: {len(coreset_dataset)}")
+    print(f"Coreset数据集大小: {coreset_size}")
 
     # 创建模型
     print("\n创建模型...")
@@ -491,36 +497,13 @@ def run_experiment(args):
 
     model_coreset = model_factory(num_classes=num_classes).to(device)
 
-    # Coreset 超参数自适应调整
-    # Coreset 样本少，需要更低学习率和更强正则化
-    coreset_lr = lr * max(0.1, min(1.0, coreset_size / len(train_subset_aug)))
-    coreset_epochs = args.epochs
-    coreset_weight_decay = 5e-4
+    # Coreset 训练配置（与原始resnet_cifar.py一致）
+    # tile重复+数据增强+Adam(5e-5)+6 epochs
+    coreset_epochs = 6
+    coreset_weight_decay = 1e-4
 
-    if coreset_size < 5000:
-        # 小样本集：显著降低学习率，增强正则化
-        coreset_lr = lr * 0.01
-        coreset_weight_decay = 5e-3  # 10x 更强的 weight decay
-        coreset_label_smoothing = 0.1  # 标签平滑防止过拟合
-        coreset_warmup_epochs = 5  # Warmup 稳定早期训练
-        print(f"Coreset 调整：学习率 {lr:.3f} -> {coreset_lr:.3f}，"
-              f"weight_decay 5e-4 -> {coreset_weight_decay}，"
-              f"label_smoothing=0.1，warmup_epochs=5")
-
-    # 计算每类平均样本数
-    samples_per_class = coreset_size / num_classes
-    if samples_per_class < 50:
-        # 每类样本极少时使用 Adam（对小样本更稳定）
-        coreset_optimizer_type = 'adam'
-        coreset_lr = 0.001  # Adam 默认学习率
-        coreset_label_smoothing = 0.15  # 更强的标签平滑
-        coreset_warmup_epochs = 10  # 更长的 warmup
-        print(f"极小 Coreset（{samples_per_class:.0f}样本/类）：切换到 Adam，lr={coreset_lr}，"
-              f"label_smoothing={coreset_label_smoothing}，warmup={coreset_warmup_epochs}")
-    else:
-        coreset_optimizer_type = optimizer_type
-        coreset_label_smoothing = 0.0
-        coreset_warmup_epochs = 0
+    print(f"Coreset 训练配置：{coreset_epochs} epochs, Adam(5e-5), "
+          f"weight_decay={coreset_weight_decay}, tile重复机制")
 
     history_coreset = train_model(
         model_coreset,
@@ -528,11 +511,7 @@ def run_experiment(args):
         val_loader,
         coreset_epochs,
         device,
-        learning_rate=coreset_lr,
-        optimizer_type=coreset_optimizer_type,
-        weight_decay=coreset_weight_decay,
-        label_smoothing=coreset_label_smoothing,
-        warmup_epochs=coreset_warmup_epochs
+        is_coreset=True  # 使用Adam(5e-5)，tile重复模式下不使用自适应lr
     )
 
     test_acc_coreset = evaluate_model(model_coreset, test_loader, device)
