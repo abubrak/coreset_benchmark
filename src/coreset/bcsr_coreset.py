@@ -22,11 +22,12 @@ class BCSRCoreset:
     def __init__(
         self,
         kernel_fn: Optional[Callable] = None,
-        learning_rate_inner: float = 0.01,
-        learning_rate_outer: float = 0.1,
-        num_inner_steps: int = 50,
-        num_outer_steps: int = 20,
+        learning_rate_inner: float = 5.0,
+        learning_rate_outer: float = 5.0,
+        num_inner_steps: int = 1,
+        num_outer_steps: int = 5,
         lmbda: float = 0.0,
+        beta: float = 0.1,
         device: str = 'cpu',
         random_state: Optional[int] = None
     ):
@@ -40,6 +41,7 @@ class BCSRCoreset:
             num_inner_steps: 内层优化步数
             num_outer_steps: 外层优化步数
             lmbda: L2正则化系数
+            beta: 平滑top-K系数
             device: 设备 ('cpu' 或 'cuda')
             random_state: 随机种子
         """
@@ -49,6 +51,7 @@ class BCSRCoreset:
         self.num_inner_steps = num_inner_steps
         self.num_outer_steps = num_outer_steps
         self.lmbda = lmbda
+        self.beta = beta
         self.device = device
         self.random_state = random_state
 
@@ -156,8 +159,7 @@ class BCSRCoreset:
         y: torch.Tensor,
         coreset_size: int,
         model: Optional[torch.nn.Module] = None,
-        validation_split: float = 0.2,
-        batch_size: int = 128
+        validation_split: float = 0.2
     ) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """
         使用BCSR方法选择coreset
@@ -167,8 +169,7 @@ class BCSRCoreset:
             y: 标签，形状为 (n_samples,)
             coreset_size: coreset大小
             model: PyTorch模型（用于基于梯度的方法）
-            validation_split: 验证集比例
-            batch_size: 批次大小
+            validation_split: 验证集比例（用于核方法模式）
 
         返回:
             selected_X: 选择的coreset数据
@@ -189,7 +190,7 @@ class BCSRCoreset:
         # 方法1: 如果提供了模型，使用基于双层优化的方法
         if model is not None:
             weights = self._optimize_weights_with_model(
-                X, y, model, validation_split, batch_size
+                X, y, model, coreset_size
             )
         # 方法2: 否则使用简化的基于核的方法
         else:
@@ -197,8 +198,22 @@ class BCSRCoreset:
                 X, y, validation_split
             )
 
-        # 根据权重选择top-k样本
-        top_k_indices = np.argsort(-weights)[:coreset_size]
+        # 使用torch.multinomial进行采样选择
+        weights_tensor = torch.from_numpy(weights).float()
+        weights_tensor = torch.clamp(weights_tensor, min=0)
+        if weights_tensor.sum() > 0:
+            weights_tensor = weights_tensor / weights_tensor.sum()
+        else:
+            weights_tensor = torch.ones_like(weights_tensor) / len(weights_tensor)
+
+        if self.random_state is not None:
+            generator = torch.Generator()
+            generator.manual_seed(self.random_state)
+            top_k_indices = torch.multinomial(weights_tensor, coreset_size,
+                                              replacement=False, generator=generator).numpy()
+        else:
+            top_k_indices = torch.multinomial(weights_tensor, coreset_size,
+                                              replacement=False).numpy()
 
         # 提取选择的样本
         if isinstance(X, torch.Tensor):
@@ -240,8 +255,7 @@ class BCSRCoreset:
         X: torch.Tensor,
         y: torch.Tensor,
         model: torch.nn.Module,
-        validation_split: float,
-        batch_size: int
+        coreset_size: int
     ) -> np.ndarray:
         """
         使用模型进行双层优化来学习权重
@@ -250,34 +264,17 @@ class BCSRCoreset:
             X: 训练数据
             y: 标签
             model: PyTorch模型
-            validation_split: 验证集比例
-            batch_size: 批次大小
+            coreset_size: coreset大小
 
         返回:
             weights: 学习到的样本权重
         """
-        from torch.utils.data import TensorDataset, DataLoader, random_split
-
-        # 划分训练集和验证集
-        dataset = TensorDataset(X, y)
-        val_size = int(len(dataset) * validation_split)
-        train_size = len(dataset) - val_size
-
-        train_dataset, val_dataset = random_split(
-            dataset, [train_size, val_size]
-        )
-
-        train_loader = DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True
-        )
-        val_loader = DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False
-        )
-
-        # 导入BCSR训练器
         from ..training.bcsr_training import BCSRTraining
 
-        # 创建训练器
+        n_samples = X.shape[0]
+        X = X.to(self.device)
+        y = y.to(self.device)
+
         trainer = BCSRTraining(
             model=model,
             kernel_fn=self.kernel_fn,
@@ -285,16 +282,13 @@ class BCSRCoreset:
             learning_rate_outer=self.lr_outer,
             num_inner_steps=self.num_inner_steps,
             num_outer_steps=self.num_outer_steps,
+            beta=self.beta,
             lmbda=self.lmbda,
             device=self.device
         )
 
-        # 训练并获取权重
-        weights = trainer.train(train_loader, val_loader, n_samples=train_size)
-
-        # 转换为numpy数组
+        weights, info = trainer.train(X, y, n_samples, topk=coreset_size)
         weights = weights.detach().cpu().numpy()
-
         return weights
 
     def _optimize_weights_kernel(

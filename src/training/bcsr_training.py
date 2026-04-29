@@ -1,338 +1,362 @@
 """
 BCSR (Bilevel Coreset Selection with Reweighting) 训练模块
 
-实现基于双层优化的coreset选择训练方法，包含：
-- 内层优化：训练代理模型（surrogate model）
-- 外层优化：更新样本权重
+实现基于双层优化的coreset选择训练方法，使用Neumann系列近似进行隐式微分。
+- 内层优化：加权SGD训练代理模型
+- 外层优化：使用平滑top-K正则化更新样本权重
 """
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, Callable
-import numpy as np
-
-from .losses import cross_entropy_loss, accuracy
 
 
 class BCSRTraining:
     """
-    BCSR训练类
+    BCSR训练类 - 实现双层优化框架用于coreset选择
 
-    实现双层优化框架用于coreset选择：
-    - 内层：在加权数据上训练代理模型
-    - 外层：基于验证损失更新样本权重
+    算法核心：
+    1. 内层：在加权数据上训练代理模型
+    2. 外层：使用Neumann系列近似计算雅可比矩阵，更新样本权重
+    3. 使用平滑top-K正则化促进稀疏权重分布
     """
 
     def __init__(
         self,
         model: nn.Module,
-        kernel_fn: Optional[Callable] = None,
-        learning_rate_inner: float = 0.01,
-        learning_rate_outer: float = 0.1,
-        num_inner_steps: int = 50,
-        num_outer_steps: int = 20,
+        lr: float = 5.0,
+        learning_rate_inner: float = None,
+        learning_rate_outer: float = None,
+        inner_epochs: int = 1,
+        num_inner_steps: int = None,
+        outer_steps: int = 5,
+        num_outer_steps: int = None,
+        beta: float = 0.1,
         lmbda: float = 0.0,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        kernel_fn: Optional[Callable] = None
     ):
         """
         初始化BCSR训练器
 
         参数:
-            model: PyTorch模型
-            kernel_fn: 核函数（如果使用核方法）
-            learning_rate_inner: 内层优化学习率
-            learning_rate_outer: 外层优化学习率
-            num_inner_steps: 内层优化步数
-            num_outer_steps: 外层优化步数
-            lmbda: L2正则化系数
+            model: PyTorch模型（代理模型）
+            lr: 权重学习率 (默认: 5.0)
+            learning_rate_inner: 内层学习率（兼容性参数，优先使用lr）
+            learning_rate_outer: 外层学习率（兼容性参数，优先使用lr）
+            inner_epochs: 内层训练轮数 (默认: 1)
+            num_inner_steps: 内层步数（兼容性参数，同inner_epochs）
+            outer_steps: 外层优化步数 (默认: 5)
+            num_outer_steps: 外层步数（兼容性参数，同outer_steps）
+            beta: 平滑top-K正则化系数 (默认: 0.1)
+            lmbda: L2正则化系数（保留用于兼容性）
             device: 设备 ('cpu' 或 'cuda')
+            kernel_fn: 核函数（保留用于兼容性）
         """
         self.model = model.to(device)
-        self.kernel_fn = kernel_fn
-        self.lr_inner = learning_rate_inner
-        self.lr_outer = learning_rate_outer
-        self.num_inner_steps = num_inner_steps
-        self.num_outer_steps = num_outer_steps
+        # 兼容新旧参数名
+        self.lr = learning_rate_outer if learning_rate_outer is not None else lr
+        self.lr_p = learning_rate_inner if learning_rate_inner is not None else 0.01
+        self.inner_epochs = num_inner_steps if num_inner_steps is not None else inner_epochs
+        self.outer_steps = num_outer_steps if num_outer_steps is not None else outer_steps
+        self.beta = beta
         self.lmbda = lmbda
+        self.kernel_fn = kernel_fn
         self.device = device
-
-        # 初始化优化器
-        self.optimizer_inner = optim.SGD(
-            self.model.parameters(),
-            lr=learning_rate_inner
-        )
-
-        # 存储训练历史
-        self.history = {
-            'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': [],
-            'weights': []
-        }
 
     def train_inner(
         self,
-        train_loader,
-        weights: torch.Tensor,
-        val_loader: Optional = None
-    ) -> Dict[str, float]:
+        X: torch.Tensor,
+        y: torch.Tensor,
+        sample_weights: torch.Tensor
+    ) -> torch.Tensor:
         """
         内层优化：在加权数据上训练代理模型
 
+        使用加权SGD更新模型参数，权重高的样本对梯度贡献更大。
+
         参数:
-            train_loader: 训练数据加载器
-            weights: 样本权重，形状为 (n_samples,)
-            val_loader: 验证数据加载器（可选）
+            X: 训练数据，形状 (n_samples, n_features)
+            y: 训练标签，形状 (n_samples,)
+            sample_weights: 样本权重，形状 (n_samples,)
 
         返回:
-            metrics: 包含训练和验证指标的字典
+            loss: 最终的内层损失值
         """
         self.model.train()
+        loss = float('inf')
 
-        train_losses = []
-        train_accs = []
+        for _ in range(self.inner_epochs):
+            # 创建优化器
+            optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr_p)
+            optimizer.zero_grad()
 
-        weight_idx = 0
+            # 转移数据到设备
+            X = X.to(self.device).float()
+            y = y.to(self.device).long()
+            sample_weights = sample_weights.to(self.device).float().detach()
 
-        for epoch in range(self.num_inner_steps):
-            epoch_loss = 0.0
-            epoch_correct = 0
-            epoch_total = 0
+            # 前向传播
+            output = self.model(X)
 
-            for batch_idx, (data, target) in enumerate(train_loader):
-                data = data.to(self.device)
-                target = target.to(self.device)
-                batch_size = data.size(0)
+            # 计算加权交叉熵损失
+            loss = torch.mean(
+                sample_weights * F.cross_entropy(output, y, reduction='none')
+            )
 
-                # 获取当前批次的权重
-                batch_weights = weights[weight_idx:weight_idx + batch_size]
-                weight_idx += batch_size
+            # 反向传播并更新参数
+            loss.backward()
+            optimizer.step()
+            self.model.zero_grad()
 
-                # 前向传播
-                if self.kernel_fn is not None:
-                    # 使用核方法
-                    with torch.no_grad():
-                        features = self.model(data)
-                    # 这里简化处理，实际需要更复杂的核方法实现
-                    output = self.model(data)
-                else:
-                    output = self.model(data)
+        return loss
 
-                # 计算加权损失
-                loss = nn.functional.cross_entropy(
-                    output, target, reduction='none'
-                )
-                weighted_loss = (loss * batch_weights).mean()
+    def _projection_onto_simplex(
+        self,
+        v: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        将向量投影到单纯形（非负且和为1）
 
-                # 反向传播
-                self.optimizer_inner.zero_grad()
-                weighted_loss.backward()
-                self.optimizer_inner.step()
+        使用(Duchi et al., 2008)的算法，确保权重满足：
+        - w_i >= 0（非负）
+        - sum(w_i) = 1（和为1）
 
-                # 统计
-                epoch_loss += weighted_loss.item() * batch_size
-                pred = output.argmax(dim=1)
-                epoch_correct += (pred == target).sum().item()
-                epoch_total += batch_size
+        参数:
+            v: 输入向量，形状 (n,)
 
-            # 计算平均指标
-            avg_loss = epoch_loss / epoch_total
-            avg_acc = epoch_correct / epoch_total
+        返回:
+            w: 投影后的向量，满足w >= 0且sum(w) = 1
+        """
+        n = v.shape[0]
 
-            train_losses.append(avg_loss)
-            train_accs.append(avg_acc)
+        # 确保非负
+        v = torch.clamp(v, min=0.0)
 
-            # 重置权重索引
-            weight_idx = 0
+        # 如果和为0，返回均匀分布
+        if v.sum() == 0:
+            return torch.ones(n, device=v.device) / n
 
-        # 验证
-        val_metrics = {}
-        if val_loader is not None:
-            val_metrics = self._evaluate(val_loader)
+        # 排序
+        u = torch.sort(v, descending=True)[0]
 
-        # 组合指标
-        metrics = {
-            'train_loss': train_losses[-1] if train_losses else 0.0,
-            'train_acc': train_accs[-1] if train_accs else 0.0,
-            **val_metrics
-        }
+        # 找到rho（向量化）
+        cumsum = torch.cumsum(u, dim=0)
+        rho_mask = u - (cumsum - 1.0) / torch.arange(1, n + 1, device=v.device, dtype=torch.float32) > 0
+        rho = rho_mask.sum().item()
 
-        return metrics
+        # 计算阈值
+        theta = (cumsum[rho - 1] - 1.0) / rho
+
+        # 投影
+        w = torch.clamp(v - theta, min=0.0)
+
+        # 数值稳定性检查
+        if w.sum() == 0:
+            w = torch.ones(n, device=v.device) / n
+        else:
+            w = w / w.sum()
+
+        return w
+
+    def _update_sample_weights(
+        self,
+        X: torch.Tensor,
+        y: torch.Tensor,
+        sample_weights: torch.Tensor,
+        topk: int,
+        epsilon: float = 1e-3
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        使用Neumann系列近似更新样本权重（双层优化的关键）
+
+        算法步骤：
+        1. 计算外层损失（平滑top-K正则化）
+        2. 计算外层梯度 dL_outer/dθ
+        3. 使用Neumann系列近似计算雅可比矩阵 dθ*/dw
+        4. 更新权重：w <- w - lr * dL_outer/dw
+
+        Neumann系列：
+        雅可比矩阵通过求解隐式方程获得：
+        dθ*/dw ≈ -Σ_{t=0}^{T} (I - η*H)^t * g
+
+        其中：
+        - H = ∂²L_inner/∂θ²（海森矩阵）
+        - g = ∂²L_inner/∂θ∂w（混合导数）
+        - T=3（系列迭代次数）
+
+        参数:
+            X: 训练数据，形状 (n_samples, n_features)
+            y: 训练标签，形状 (n_samples,)
+            sample_weights: 当前样本权重，形状 (n_samples,)
+            topk: 选择的coreset大小
+            epsilon: 平滑top-K的小常数
+
+        返回:
+            sample_weights: 更新后的样本权重
+            jacobian: 雅可比矩阵（用于调试）
+            loss_outer: 外层损失值
+        """
+        # 生成平滑top-K的随机噪声
+        z = torch.randn(topk, device=self.device)
+
+        # 计算外层损失：平均损失 - beta * 平滑top-K正则化
+        loss_outer = F.cross_entropy(self.model(X), y, reduction='none')
+
+        # 获取top-k权重（用于正则化）
+        topk_weights, _ = sample_weights.topk(topk)
+
+        # 外层损失：L_outer = mean(loss) - beta * (topk_weights + epsilon*z).sum()
+        # 这鼓励权重集中在top-k个样本上
+        loss_outer_avg = torch.mean(loss_outer) - self.beta * (topk_weights + epsilon * z).sum()
+
+        # 第1步：计算外层梯度 v0 = dL_outer/dθ
+        d_theta = torch.autograd.grad(
+            loss_outer_avg,
+            self.model.parameters(),
+            allow_unused=True
+        )
+        v_0 = d_theta
+
+        # 第2步：计算内层梯度（用于Neumann系列）
+        # 使用softmax归一化的权重来计算内层损失
+        # 确保sample_weights需要梯度
+        if not sample_weights.requires_grad:
+            sample_weights = sample_weights.requires_grad_(True)
+
+        loss_inner = torch.mean(
+            F.softmax(sample_weights, dim=-1) *
+            F.cross_entropy(self.model(X), y, reduction='none')
+        )
+
+        # 计算内层梯度（需要计算图，用于高阶微分）
+        grads_theta = torch.autograd.grad(
+            loss_inner,
+            self.model.parameters(),
+            create_graph=True  # 关键：创建计算图以支持二阶导数
+        )
+
+        # 第3步：计算G_theta = θ - η * ∇_θ L_inner
+        # 这是内层更新后的参数（未实际执行）
+        G_theta = []
+        for p, g in zip(self.model.parameters(), grads_theta):
+            if g is None:
+                G_theta.append(None)
+            else:
+                G_theta.append(p - self.lr_p * g)
+
+        # 第4步：Neumann系列近似（T=3次迭代）
+        # 计算 v_Q = Σ_{t=0}^{T-1} (I - ηH)^t * v_0
+        # 这是雅可比-向量积，用于隐式微分
+        v_Q = v_0
+        for _ in range(3):
+            # 计算 (I - ηH) * v_0
+            # 通过自动微分实现：∂G_theta/∂θ * v_0
+            v_new = torch.autograd.grad(
+                G_theta,
+                self.model.parameters(),
+                grad_outputs=v_0,
+                retain_graph=True
+            )
+            # 分离梯度以避免计算图过大
+            v_0 = [i.detach() for i in v_new]
+
+            # 累加到v_Q
+            for i in range(len(v_0)):
+                v_Q[i].add_(v_0[i].detach())
+
+        # 第5步：计算雅可比矩阵 dθ*/dw
+        # 使用链式法则：dL_outer/dw = dL_outer/dθ * dθ*/dw
+        # 通过隐式微分：jacobian = -∂(∇_θ L_inner)/∂w * v_Q
+        jacobian = -torch.autograd.grad(
+            grads_theta,
+            sample_weights,
+            grad_outputs=v_Q
+        )[0]
+
+        # 第6步：更新权重
+        with torch.no_grad():
+            sample_weights -= self.lr * jacobian
+
+        return sample_weights, jacobian, loss_outer
 
     def train_outer(
         self,
-        train_loader,
-        val_loader,
-        n_samples: int
-    ) -> torch.Tensor:
+        X: torch.Tensor,
+        y: torch.Tensor,
+        sample_weights: torch.Tensor,
+        topk: int
+    ) -> Tuple[torch.Tensor, Dict]:
         """
-        外层优化：基于验证损失更新样本权重
+        外层优化：多次迭代更新样本权重
 
         参数:
-            train_loader: 训练数据加载器
-            val_loader: 验证数据加载器
-            n_samples: 训练样本总数
+            X: 训练数据，形状 (n_samples, n_features)
+            y: 训练标签，形状 (n_samples,)
+            sample_weights: 初始样本权重，形状 (n_samples,)
+            topk: 选择的coreset大小
 
         返回:
-            weights: 更新后的样本权重，形状为 (n_samples,)
+            sample_weights: 最终的样本权重
+            info: 包含训练信息的字典
+        """
+        info = {
+            'weights_history': [],
+            'jacobian_norm': [],
+            'loss_outer_history': []
+        }
+
+        for outer_step in range(self.outer_steps):
+            # 1. 内层优化：训练代理模型
+            _ = self.train_inner(X, y, sample_weights)
+
+            # 2. 外层优化：更新样本权重
+            sample_weights, jacobian, loss_outer = self._update_sample_weights(
+                X, y, sample_weights, topk
+            )
+
+            # 3. 投影到单纯形（确保权重非负且和为1）
+            sample_weights = self._projection_onto_simplex(sample_weights)
+
+            # 记录历史
+            info['weights_history'].append(sample_weights.detach().clone().cpu().numpy())
+            info['jacobian_norm'].append(torch.norm(jacobian).item())
+            info['loss_outer_history'].append(torch.mean(loss_outer).item())
+
+        return sample_weights, info
+
+    def train(
+        self,
+        X: torch.Tensor,
+        y: torch.Tensor,
+        n_samples: int,
+        topk: int
+    ) -> Tuple[torch.Tensor, Dict]:
+        """
+        完整的BCSR训练流程
+
+        参数:
+            X: 训练数据，形状 (n_samples, n_features)
+            y: 训练标签，形状 (n_samples,)
+            n_samples: 样本数量（与X.shape[0]相同，用于接口兼容）
+            topk: 选择的coreset大小
+
+        返回:
+            weights: 最终的样本权重，形状 (n_samples,)
+            info: 包含训练信息的字典
         """
         # 初始化权重为均匀分布
         weights = torch.ones(n_samples, device=self.device) / n_samples
 
-        for outer_step in range(self.num_outer_steps):
-            # 内层优化：训练代理模型
-            train_metrics = self.train_inner(train_loader, weights, val_loader)
+        # 外层优化
+        weights, info = self.train_outer(X, y, weights, topk)
 
-            # 计算验证损失和梯度
-            self.model.eval()
-            val_loss = 0.0
-            weight_idx = 0
-            sample_gradients = []
+        # 添加兼容性键
+        info['outer_loss'] = info['loss_outer_history']
 
-            with torch.no_grad():
-                for batch_idx, (data, target) in enumerate(train_loader):
-                    data = data.to(self.device)
-                    target = target.to(self.device)
-                    batch_size = data.size(0)
+        return weights, info
 
-                    # 获取当前批次的权重
-                    batch_weights = weights[weight_idx:weight_idx + batch_size]
 
-                    # 前向传播
-                    output = self.model(data)
-
-                    # 计算每个样本的损失
-                    sample_losses = nn.functional.cross_entropy(
-                        output, target, reduction='none'
-                    )
-
-                    # 计算验证损失（在验证集上）
-                    for val_data, val_target in val_loader:
-                        val_data = val_data.to(self.device)
-                        val_target = val_target.to(self.device)
-                        val_output = self.model(val_data)
-                        val_loss_batch = nn.functional.cross_entropy(
-                            val_output, val_target
-                        )
-                        val_loss += val_loss_batch.item()
-                        break  # 只计算一个batch作为示例
-
-                    # 计算样本梯度（简化版本）
-                    # 实际应该使用自动微分计算 d(val_loss)/d(weights)
-                    sample_grad = sample_losses.detach()
-                    sample_gradients.append(sample_grad)
-
-                    weight_idx += batch_size
-
-            # 更新权重（梯度上升，因为我们要最大化验证集性能）
-            weight_idx = 0
-            for batch_idx, (data, target) in enumerate(train_loader):
-                batch_size = data.size(0)
-                batch_grad = sample_gradients[batch_idx]
-
-                # 更新权重
-                weights[weight_idx:weight_idx + batch_size] -= \
-                    self.lr_outer * batch_grad
-
-                weight_idx += batch_size
-
-            # 投影到单纯形（权重非负且和为1）
-            weights = self._projection_onto_simplex(weights)
-
-            # 记录历史
-            self.history['train_loss'].append(train_metrics['train_loss'])
-            self.history['train_acc'].append(train_metrics['train_acc'])
-            self.history['val_loss'].append(train_metrics.get('val_loss', 0.0))
-            self.history['val_acc'].append(train_metrics.get('val_acc', 0.0))
-            self.history['weights'].append(weights.clone().cpu().numpy())
-
-        return weights
-
-    def _projection_onto_simplex(self, v: torch.Tensor) -> torch.Tensor:
-        """
-        将向量投影到单纯形（非负且和为1）
-
-        参数:
-            v: 输入向量
-
-        返回:
-            投影后的向量
-        """
-        # 确保非负
-        v = torch.clamp(v, min=0)
-
-        # 如果和为0，返回均匀分布
-        if v.sum() == 0:
-            return torch.ones_like(v) / len(v)
-
-        # 归一化
-        v = v / v.sum()
-
-        return v
-
-    def _evaluate(self, data_loader) -> Dict[str, float]:
-        """
-        评估模型
-
-        参数:
-            data_loader: 数据加载器
-
-        返回:
-            metrics: 包含验证指标的字典
-        """
-        self.model.eval()
-
-        total_loss = 0.0
-        correct = 0
-        total = 0
-
-        with torch.no_grad():
-            for data, target in data_loader:
-                data = data.to(self.device)
-                target = target.to(self.device)
-
-                output = self.model(data)
-                loss = nn.functional.cross_entropy(output, target)
-
-                total_loss += loss.item() * data.size(0)
-                pred = output.argmax(dim=1)
-                correct += (pred == target).sum().item()
-                total += data.size(0)
-
-        metrics = {
-            'val_loss': total_loss / total,
-            'val_acc': correct / total
-        }
-
-        return metrics
-
-    def train(
-        self,
-        train_loader,
-        val_loader,
-        n_samples: int
-    ) -> torch.Tensor:
-        """
-        完整的训练流程
-
-        参数:
-            train_loader: 训练数据加载器
-            val_loader: 验证数据加载器
-            n_samples: 训练样本总数
-
-        返回:
-            weights: 最终的样本权重
-        """
-        print(f"开始BCSR训练，共{self.num_outer_steps}个外层迭代")
-
-        weights = self.train_outer(train_loader, val_loader, n_samples)
-
-        print("BCSR训练完成")
-        print(f"最终训练损失: {self.history['train_loss'][-1]:.4f}")
-        print(f"最终训练准确率: {self.history['train_acc'][-1]:.4f}")
-        print(f"最终验证损失: {self.history['val_loss'][-1]:.4f}")
-        print(f"最终验证准确率: {self.history['val_acc'][-1]:.4f}")
-
-        return weights
+# 为了兼容性，添加numpy导入
+import numpy as np

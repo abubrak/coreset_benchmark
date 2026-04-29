@@ -395,6 +395,7 @@ def run_experiment(args):
             learning_rate_outer=args.bcsr_outer_lr,
             num_inner_steps=args.bcsr_inner_steps,
             num_outer_steps=args.bcsr_outer_steps,
+            beta=args.bcsr_beta,
             device=device,
             random_state=args.seed
         )
@@ -619,14 +620,16 @@ def main():
                        help='Coreset选择比例')
 
     # BCSR特定参数
-    parser.add_argument('--bcsr_inner_lr', type=float, default=0.01,
-                       help='BCSR内层学习率')
-    parser.add_argument('--bcsr_outer_lr', type=float, default=0.1,
-                       help='BCSR外层学习率')
-    parser.add_argument('--bcsr_inner_steps', type=int, default=50,
-                       help='BCSR内层优化步数')
-    parser.add_argument('--bcsr_outer_steps', type=int, default=20,
-                       help='BCSR外层优化步数')
+    parser.add_argument('--bcsr_inner_lr', type=float, default=5.0,
+                       help='BCSR内层学习率 (默认: 5.0)')
+    parser.add_argument('--bcsr_outer_lr', type=float, default=5.0,
+                       help='BCSR外层学习率 (默认: 5.0)')
+    parser.add_argument('--bcsr_inner_steps', type=int, default=1,
+                       help='BCSR内层优化步数 (默认: 1)')
+    parser.add_argument('--bcsr_outer_steps', type=int, default=5,
+                       help='BCSR外层优化步数 (默认: 5)')
+    parser.add_argument('--bcsr_beta', type=float, default=0.1,
+                       help='BCSR正则化系数beta (默认: 0.1)')
 
     # 训练参数
     parser.add_argument('--epochs', type=int, default=50,
