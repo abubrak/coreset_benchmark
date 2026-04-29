@@ -14,6 +14,20 @@ from .csrel_utils import (
     add_new_data,
     compute_loss_dic
 )
+from .csrel_loss import (
+    CompliedLoss,
+    KDCrossEntropyLoss
+)
+from .csrel_train import (
+    train_model,
+    eval_model,
+    compute_accuracy,
+    compute_avg_loss,
+    compute_loss_var,
+    save_model,
+    load_model,
+    clear_temp_model
+)
 
 __all__ = [
     'BilevelCoreset',
@@ -25,5 +39,15 @@ __all__ = [
     'make_class_sizes',
     'get_subset_by_id',
     'add_new_data',
-    'compute_loss_dic'
+    'compute_loss_dic',
+    'CompliedLoss',
+    'KDCrossEntropyLoss',
+    'train_model',
+    'eval_model',
+    'compute_accuracy',
+    'compute_avg_loss',
+    'compute_loss_var',
+    'save_model',
+    'load_model',
+    'clear_temp_model'
 ]
