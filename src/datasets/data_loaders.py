@@ -235,3 +235,64 @@ def get_split_dataset(
     }
 
     return dataset, info
+
+
+# --- 全局参数：各数据集完整训练集大小，用于 tile 重复计算 ---
+DATASET_TRAIN_SIZE = {
+    'MNIST': 60000,
+    'CIFAR10': 50000,
+    'CIFAR100': 50000,
+}
+
+
+def get_coreset_train_loader(
+    train_dataset: torch.utils.data.Dataset,
+    indices: np.ndarray,
+    coreset_size: int,
+    dataset_name: str = 'CIFAR10',
+    batch_size: int = 64,
+    num_workers: int = 2,
+) -> DataLoader:
+    """
+    为 coreset 子集构建训练 DataLoader，使用 tile 重复机制。
+
+    关键机制：将 coreset 索引通过 np.tile 重复 N 次，
+    使每个 epoch 的样本总数 ≈ 完整训练集大小（50,000 / 60,000）。
+    配合数据增强（RandomCrop + RandomHorizontalFlip），
+    同一张图片每次重复会产生不同的裁剪/翻转变体。
+
+    等价于原始代码 data_summarization/resnet_cifar.py:93-102 的 get_train_loader。
+
+    Args:
+        train_dataset: 带数据增强的完整训练集
+        indices: coreset 选出的样本索引
+        coreset_size: coreset 大小（= len(indices)）
+        dataset_name: 数据集名称，用于查询完整集大小
+        batch_size: batch 大小
+        num_workers: DataLoader 工作线程数
+
+    Returns:
+        配置好的 DataLoader
+    """
+    full_train_size = DATASET_TRAIN_SIZE.get(dataset_name, 50000)
+    nr_repeats = full_train_size // coreset_size  # 210样本时 ≈ 238 (CIFAR)
+
+    # tile 重复索引，使每 epoch 总样本 ≈ full_train_size
+    inds_repeated = np.tile(indices, nr_repeats)
+    # 截断至 batch_size 的整数倍
+    truncate_len = len(inds_repeated) // batch_size * batch_size
+    inds_repeated = inds_repeated[:truncate_len]
+
+    print(f"[CoresetLoader] {coreset_size} unique samples x {nr_repeats} repeats "
+          f"= {len(inds_repeated)} total samples/epoch "
+          f"({len(inds_repeated) // batch_size} iterations)")
+
+    subset = torch.utils.data.Subset(train_dataset, inds_repeated)
+
+    # Windows系统下num_workers设为0
+    import platform
+    if platform.system() == 'Windows':
+        num_workers = 0
+
+    return DataLoader(subset, batch_size=batch_size, shuffle=True,
+                      pin_memory=True, num_workers=num_workers)
