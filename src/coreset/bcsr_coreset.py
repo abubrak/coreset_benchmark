@@ -362,8 +362,8 @@ class BCSRCoreset:
             # RBF 核
             K_batch = torch.exp(-gamma * dist_sq)  # (batch, n)
 
-            # 每行的均值
-            diversity_scores[start:end] = K_batch.mean(dim=1)
+            # 每行的均值（取反：RBF核度量相似性，低均值=高多样性）
+            diversity_scores[start:end] = -K_batch.mean(dim=1)
 
         # 计算类别平衡权重（PyTorch）
         unique_labels = torch.unique(y_t)
