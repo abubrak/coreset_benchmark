@@ -37,6 +37,7 @@ from src.coreset.selection_functions import (
     select_by_margin,
     select_by_gradient_norm
 )
+# Import coreset adapters (CSReL and Bilevel adapters will be added in Tasks 3 and 5)
 from src.coreset.continual_adapters import (
     BCSRContinualAdapter
 )
