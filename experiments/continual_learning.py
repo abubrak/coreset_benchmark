@@ -40,7 +40,8 @@ from src.coreset.selection_functions import (
 # Import coreset adapters (CSReL and Bilevel adapters will be added in Tasks 3 and 5)
 from src.coreset.continual_adapters import (
     BCSRContinualAdapter,
-    CSReLContinualAdapter
+    CSReLContinualAdapter,
+    BilevelContinualAdapter
 )
 
 
@@ -331,6 +332,24 @@ class CoresetBuffer:
                 batch_size=128,
                 selection_ratio=num_samples / len(data),
                 class_balance=True,
+                device=data.device
+            )
+
+            selected_data, selected_labels = adapter.select(
+                data=data,
+                labels=labels,
+                num_samples=num_samples,
+                model=model
+            )
+
+            # Return directly (already tensors)
+            return selected_data, selected_labels
+
+        elif method == "bilevel":
+            # Bilevel Coreset (simplified kernel herding version)
+            adapter = BilevelContinualAdapter(
+                val_ratio=0.2,
+                max_outer_it=5,
                 device=data.device
             )
 
@@ -912,7 +931,7 @@ def main():
                        help='经验回放缓冲区大小')
     parser.add_argument('--selection_method', type=str, default='random',
                        choices=['random', 'uniform', 'loss', 'margin', 'gradient',
-                               'bcsr', 'csrel'],
+                               'bcsr', 'csrel', 'bilevel'],
                        help='Coreset选择方法')
 
     # 其他参数
