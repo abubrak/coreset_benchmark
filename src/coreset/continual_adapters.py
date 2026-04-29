@@ -104,3 +104,142 @@ class BCSRContinualAdapter:
         selected_labels = torch.from_numpy(selected_y).long().to(self.device)
 
         return selected_data, selected_labels
+
+
+class CSReLContinualAdapter:
+    """
+    Adapter for CSReL method in continual learning scenarios.
+
+    Wraps the CSReLCoreset class to provide a simple interface compatible
+    with CoresetBuffer.select_coreset().
+    """
+
+    def __init__(
+        self,
+        num_epochs: int = 50,
+        learning_rate: float = 0.001,
+        batch_size: int = 128,
+        selection_ratio: float = 0.1,
+        class_balance: bool = True,
+        device: str = 'cuda'
+    ):
+        """
+        Initialize CSReL adapter.
+
+        Parameters
+        ----------
+        num_epochs : int
+            Reference model training epochs.
+        learning_rate : float
+            Learning rate for reference model training.
+        batch_size : int
+            Batch size for training.
+        selection_ratio : float
+            Ratio of samples to select.
+        class_balance : bool
+            Whether to balance classes in selection.
+        device : str
+            Computation device ('cuda' or 'cpu').
+        """
+        self.device = device
+        self.num_epochs = num_epochs
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.selection_ratio = selection_ratio
+        self.class_balance = class_balance
+        self.csrel_selector = None  # Will be created on first use
+
+    def _get_selector(self, num_classes: int, dataset: str = 'MNIST') -> CSReLCoreset:
+        """Get or create CSReL selector."""
+        if self.csrel_selector is None:
+            config = CSReLConfig(
+                dataset=dataset,
+                num_classes=num_classes,
+                batch_size=self.batch_size,
+                learning_rate=self.learning_rate,
+                num_epochs=self.num_epochs,
+                selection_ratio=self.selection_ratio,
+                class_balance=self.class_balance,
+                device=self.device
+            )
+            self.csrel_selector = CSReLCoreset(config=config)
+        return self.csrel_selector
+
+    def select(
+        self,
+        data: torch.Tensor,
+        labels: torch.Tensor,
+        num_samples: int,
+        model: nn.Module
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Select coreset samples using CSReL method.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Input data of shape (n_samples, C, H, W) or (n_samples, n_features).
+        labels : torch.Tensor
+            Labels of shape (n_samples,).
+        num_samples : int
+            Number of samples to select.
+        model : nn.Module
+            Current model for computing reducible loss.
+
+        Returns
+        -------
+        selected_data : torch.Tensor
+            Selected samples of shape (num_samples, ...).
+        selected_labels : torch.Tensor
+            Selected labels of shape (num_samples,).
+        """
+        # Ensure data and labels are on correct device
+        data = data.to(self.device)
+        labels = labels.to(self.device)
+
+        num_classes = labels.max().item() + 1
+
+        # Get or create selector
+        selector = self._get_selector(
+            num_classes=num_classes,
+            dataset='MNIST' if data.shape[1] == 1 else 'CIFAR10'
+        )
+
+        # Train reference model (first time only)
+        if selector.reference_model is None:
+            print("Training CSReL reference model...")
+            selector.train_reference_model(
+                train_data=data,
+                train_labels=labels,
+                verbose=False
+            )
+
+        # Select samples using CSReL
+        # CSReL needs a different model for reducible loss computation
+        # Use a randomly initialized model as "current" model
+        # Get num_classes from the reference model's last layer
+        if hasattr(selector.reference_model, 'fc'):
+            num_classes = selector.reference_model.fc.out_features
+        elif hasattr(selector.reference_model, 'fc2'):
+            num_classes = selector.reference_model.fc2.out_features
+        else:
+            # Fallback: use the num_classes we already have
+            num_classes = num_classes
+
+        current_model = type(selector.reference_model)(
+            num_classes=num_classes
+        ).to(self.device)
+
+        selected_indices = selector.select(
+            train_data=data,
+            train_labels=labels,
+            model=current_model,
+            incremental=False,
+            verbose=False
+        )
+
+        # Extract selected samples
+        selected_data = data[selected_indices]
+        selected_labels = labels[selected_indices]
+
+        return selected_data, selected_labels

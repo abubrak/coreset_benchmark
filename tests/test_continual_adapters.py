@@ -44,7 +44,7 @@ def sample_data(device):
     """Create sample data for testing."""
     torch.manual_seed(42)
     n_samples = 100
-    data = torch.randn(n_samples, 1, 14, 14).to(device)
+    data = torch.randn(n_samples, 1, 28, 28).to(device)  # Use 28x28 for MNIST model
     labels = torch.randint(0, 5, (n_samples,)).to(device)
     return data, labels
 
@@ -99,6 +99,35 @@ def test_bcsr_adapter_select_size_larger_than_data(sample_data, sample_model, de
     # Should return all data
     assert selected_data.shape[0] == data.shape[0]
     assert selected_labels.shape[0] == labels.shape[0]
+
+
+@pytest.fixture
+def csrel_adapter(device):
+    """Create CSReL adapter for testing."""
+    from src.coreset.continual_adapters import CSReLContinualAdapter
+    return CSReLContinualAdapter(
+        num_epochs=2,  # Reduced for testing
+        device=device
+    )
+
+
+def test_csrel_adapter_select(sample_data, sample_model, csrel_adapter, device):
+    """Test CSReL adapter can select samples."""
+    data, labels = sample_data
+
+    num_samples = 20
+    selected_data, selected_labels = csrel_adapter.select(
+        data=data,
+        labels=labels,
+        num_samples=num_samples,
+        model=sample_model
+    )
+
+    # Check output shapes
+    assert selected_data.shape[0] <= num_samples  # CSReL uses ratio
+    assert selected_labels.shape[0] == selected_data.shape[0]
+    assert selected_data.device.type == device
+    assert selected_labels.device.type == device
 
 
 if __name__ == '__main__':
