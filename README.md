@@ -7,15 +7,30 @@ A comprehensive benchmark for evaluating coreset selection methods in neural net
 ```
 coreset_benchmark/
 ├── src/
-│   ├── ntk/              # Neural Tangent Kernel implementations
-│   ├── coreset/          # Core coreset selection algorithms
-│   ├── models/           # Neural network architectures
-│   ├── datasets/         # Dataset loaders and preprocessing
-│   ├── baselines/        # Baseline methods
-│   ├── utils/            # Utility functions
-│   └── training/         # Training loops and evaluation
-├── requirements.txt
-└── README.md
+│   ├── configs.py            # Configuration classes
+│   ├── coreset/              # Core coreset selection algorithms
+│   │   ├── bcsr_coreset.py       # BCSR implementation
+│   │   ├── bilevel_coreset.py     # Bilevel optimization
+│   │   ├── csrel_coreset.py       # CSReL v1
+│   │   ├── csrel_coreset_v2.py    # CSReL v2 (optimized)
+│   │   ├── continual_adapters.py  # Continual learning adapters
+│   │   └── selection_functions.py # Selection utilities
+│   ├── models/               # Neural network architectures (CNN, ResNet)
+│   ├── datasets/             # Dataset loaders (MNIST, CIFAR-10/100)
+│   ├── baselines/            # Baseline methods (6 methods)
+│   ├── ntk/                  # Neural Tangent Kernel
+│   ├── training/             # Training loops and losses
+│   └── utils/                # Checkpointing and memory utilities
+├── experiments/              # Experiment scripts
+│   ├── data_summarization.py     # Data summarization experiments
+│   └── continual_learning.py     # Continual learning experiments
+├── tests/                    # Test suite (pytest)
+├── scripts/                  # Visualization utilities
+├── docs/                     # Documentation
+├── notebooks/                # Jupyter notebooks and Colab helpers
+├── results/                  # Experiment results (gitignored)
+├── data/                     # Datasets (gitignored)
+└── requirements.txt
 ```
 
 ## Installation
@@ -44,10 +59,16 @@ coreset_indices = selector.select(train_data, train_labels)
 
 ## Methods
 
-- **Bilevel Optimization**: Gradient-based coreset selection using bilevel optimization
-- **CSReL**: Classwise Spatial Representation Learning for coreset selection
-- **Data Summarization**: Herding and Class Representative Apportionment (CRA)
-- **Continual Learning**: GSS (Gradient-based Sample Selection) and other baselines
+| Category | Method | Description |
+|----------|--------|-------------|
+| **Bilevel** | Bilevel Coreset | Gradient-based selection via bilevel optimization |
+| **Bilevel** | BCSR | Bilevel Coreset Selection with Reweighting |
+| **CSReL** | CSReL v1 | Classwise Spatial Representation Learning |
+| **CSReL** | CSReL v2 | CSReL with optimized incremental selection |
+| **Baseline** | Random / Uniform | Random sampling baselines |
+| **Baseline** | K-Center / K-Means | Geometry-based selection |
+| **Baseline** | Herding | Herding-based coreset |
+| **Baseline** | Entropy / Loss | Uncertainty-based selection |
 
 ## Coreset训练机制
 
@@ -144,10 +165,12 @@ done
 
 ### 端到端测试
 
-运行集成测试验证所有方法：
+运行测试套件验证所有方法：
 
 ```bash
+# 运行正式测试
+python -m pytest tests/ -v
+
+# 快速冒烟测试
 python test_all_methods.py
 ```
-
-这将测试所有coreset选择方法是否能正常工作。

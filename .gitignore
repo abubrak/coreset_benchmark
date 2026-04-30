@@ -62,12 +62,12 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
-results/
+output
+
+# Experiment results
+results/*.json
 
 # Model files
 # models/
 # *.safetensors
 # *.bin
-
-# Test files
-test_*.py  # Commented out to allow tests/ directory to be tracked
