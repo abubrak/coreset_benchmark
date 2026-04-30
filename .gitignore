@@ -71,3 +71,5 @@ results/*.json
 # models/
 # *.safetensors
 # *.bin
+
+test_*.py

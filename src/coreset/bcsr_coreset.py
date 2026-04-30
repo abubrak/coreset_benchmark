@@ -5,6 +5,7 @@ BCSR (Bilevel Coreset Selection with Reweighting) Coreset选择模块
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 from typing import Tuple, Dict, Optional, Callable
 import warnings
@@ -188,12 +189,12 @@ class BCSRCoreset:
         print(f"开始BCSR coreset选择，从{n_samples}个样本中选择{coreset_size}个")
 
         # 性能优化: 对超大数据集进行预采样
-        # 根据数据集维度动态调整阈值
-        n_features = X.shape[1] * X.shape[2] if X.ndim == 3 else X.shape[1]
+        # 使用特征提取+轻量模型后，可以处理更大的样本量
+        n_features = X[0].numel()  # 每个样本的总特征数 (e.g., 3*32*32=3072 for CIFAR)
         if n_features > 1000:  # 高维数据（如CIFAR的3072维）
-            MAX_SAMPLES_FOR_BILEVEL = 500  # 高维数据用更小的阈值
+            MAX_SAMPLES_FOR_BILEVEL = 5000  # 特征提取模式，可处理更多样本
         else:
-            MAX_SAMPLES_FOR_BILEVEL = 3000  # 低维数据（如MNIST的784维）
+            MAX_SAMPLES_FOR_BILEVEL = 10000  # 低维数据（如MNIST的784维）
 
         use_presampling = n_samples > MAX_SAMPLES_FOR_BILEVEL
         presample_indices = None  # 初始化
@@ -295,6 +296,73 @@ class BCSRCoreset:
 
         return selected_X, selected_y, info
 
+    def _extract_features(
+        self,
+        X: torch.Tensor,
+        model: nn.Module,
+        batch_size: int = 256
+    ) -> Optional[torch.Tensor]:
+        """
+        从模型的倒数第二层提取特征（用于高效双层优化）
+
+        关键优化：不在完整深度网络上做高阶自动微分，
+        而是提取特征后在线性分类器上做双层优化。
+        这将参数量从 ~11M (ResNet18) 降至 ~2.5K (Linear)，
+        内存占用降低约4000倍。
+
+        参数:
+            X: 输入数据
+            model: 训练好的模型
+            batch_size: 批量大小
+
+        返回:
+            features: 提取的特征，形状 (n_samples, feature_dim)
+        """
+        # 找到最后一个Linear层
+        last_linear = None
+        for name, module in reversed(list(model.named_modules())):
+            if isinstance(module, nn.Linear):
+                last_linear = module
+                break
+
+        if last_linear is None:
+            print("[警告] 模型中没有Linear层，无法提取特征")
+            return None
+
+        # 使用hook捕获Linear层的输入（即特征）
+        features_list = []
+
+        def hook_fn(module, input, output):
+            feat = input[0].detach()
+            if feat.ndim > 2:
+                feat = feat.view(feat.size(0), -1)
+            features_list.append(feat)
+
+        hook = last_linear.register_forward_hook(hook_fn)
+
+        # 保存模型状态
+        was_training = model.training
+        model.eval()
+
+        try:
+            with torch.no_grad():
+                for i in range(0, len(X), batch_size):
+                    batch = X[i:i+batch_size].to(self.device)
+                    _ = model(batch)
+        finally:
+            # 恢复模型状态
+            if was_training:
+                model.train()
+            hook.remove()
+
+        if not features_list:
+            print("[警告] 特征提取失败")
+            return None
+
+        features = torch.cat(features_list, dim=0)
+        print(f"[特征提取] 提取了 {features.shape[0]} 个样本，特征维度 {features.shape[1]}")
+        return features
+
     def _optimize_weights_with_model(
         self,
         X: torch.Tensor,
@@ -305,8 +373,13 @@ class BCSRCoreset:
         """
         使用模型进行双层优化来学习权重
 
-        **性能优化**: 对于大数据集(>5000样本),自动切换到核方法模式
-        以避免内存爆炸和计算时间过长。
+        **关键优化**: 使用特征提取 + 轻量线性模型进行双层优化，
+        避免在深度网络上进行高阶自动微分导致的内存爆炸。
+
+        策略：
+        1. 用训练好的模型提取倒数第二层特征
+        2. 创建轻量线性分类器（~2.5K参数 vs ResNet18的~11M参数）
+        3. 在特征空间进行双层优化
 
         参数:
             X: 训练数据
@@ -319,20 +392,37 @@ class BCSRCoreset:
         """
         n_samples = X.shape[0]
 
-        # 性能优化: 对大数据集使用核方法
-        # 双层优化在大数据集上: O(n^3) 复杂度，太慢
+        # 性能优化: 对超大数据集使用核方法
         if n_samples > 5000:
             print(f"[性能优化] 数据集较大({n_samples}样本)，使用快速核方法模式")
-            print(f"[提示] 如需使用完整双层优化，可减少样本数或增加内存")
             return self._optimize_weights_kernel(X, y, validation_split=0.2)
+
+        # 关键优化：提取特征，用轻量模型替代深度网络
+        features = self._extract_features(X, model)
+
+        if features is None:
+            # 回退到核方法
+            print("[回退] 特征提取失败，使用核方法")
+            return self._optimize_weights_kernel(X, y, validation_split=0.2)
+
+        # 创建轻量线性模型进行双层优化
+        num_features = features.shape[1]
+        num_classes = y.max().item() + 1
+        lightweight_model = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(num_features, num_classes)
+        ).to(self.device)
+
+        original_params = sum(p.numel() for p in model.parameters())
+        lightweight_params = sum(p.numel() for p in lightweight_model.parameters())
+        print(f"[BCSR优化] 使用特征空间双层优化")
+        print(f"[BCSR优化] 特征维度: {num_features}, 类别数: {num_classes}")
+        print(f"[BCSR优化] 轻量模型参数量: {lightweight_params} (原始模型: {original_params}, 减少{original_params/lightweight_params:.0f}倍)")
 
         from ..training.bcsr_training import BCSRTraining
 
-        X = X.to(self.device)
-        y = y.to(self.device)
-
         trainer = BCSRTraining(
-            model=model,
+            model=lightweight_model,
             kernel_fn=self.kernel_fn,
             learning_rate_inner=self.lr_inner,
             learning_rate_outer=self.lr_outer,
@@ -343,8 +433,17 @@ class BCSRCoreset:
             device=self.device
         )
 
-        weights, info = trainer.train(X, y, n_samples, topk=coreset_size)
+        features_device = features.to(self.device)
+        y_device = y.to(self.device)
+
+        weights, info = trainer.train(features_device, y_device, features.shape[0], topk=coreset_size)
         weights = weights.detach().cpu().numpy()
+
+        # 清理GPU内存
+        del features_device, lightweight_model, trainer
+        if 'cuda' in str(self.device):
+            torch.cuda.empty_cache()
+
         return weights
 
     def _optimize_weights_kernel(
