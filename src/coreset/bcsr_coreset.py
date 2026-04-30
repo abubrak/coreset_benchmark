@@ -188,7 +188,13 @@ class BCSRCoreset:
         print(f"开始BCSR coreset选择，从{n_samples}个样本中选择{coreset_size}个")
 
         # 性能优化: 对超大数据集进行预采样
-        MAX_SAMPLES_FOR_BILEVEL = 3000  # 双层优化最大样本数
+        # 根据数据集维度动态调整阈值
+        n_features = X.shape[1] * X.shape[2] if X.ndim == 3 else X.shape[1]
+        if n_features > 1000:  # 高维数据（如CIFAR的3072维）
+            MAX_SAMPLES_FOR_BILEVEL = 500  # 高维数据用更小的阈值
+        else:
+            MAX_SAMPLES_FOR_BILEVEL = 3000  # 低维数据（如MNIST的784维）
+
         use_presampling = n_samples > MAX_SAMPLES_FOR_BILEVEL
         presample_indices = None  # 初始化
 
@@ -387,8 +393,13 @@ class BCSRCoreset:
         gamma = 1.0 / X_flat.shape[1]
 
         # 分批计算多样性得分：只需要 K.mean(axis=1)，不需要完整矩阵
-        # 增大batch_size以更好利用GPU并行计算
-        batch_size = 4096  # 从1024增加到4096，减少循环次数
+        # 根据数据维度动态调整batch_size以平衡内存和速度
+        n_features = X_flat.shape[1]
+        if n_features > 2000:  # 高维数据（如CIFAR的3072维）
+            batch_size = 512  # 减小batch避免OOM
+        else:
+            batch_size = 4096  # 低维数据可以用更大的batch
+
         diversity_scores = torch.zeros(n_samples, device=device)
 
         X_norm_sq = torch.sum(X_norm ** 2, dim=1)  # (n,)

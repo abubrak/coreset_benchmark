@@ -633,7 +633,7 @@ def compute_average_accuracy(
 def create_task_datasets(
     dataset_name: str,
     num_tasks: int,
-    num_classes_per_task: int,
+    num_classes_per_task: str,
     batch_size: int,
     data_root: str = './data'
 ) -> Tuple[List[DataLoader], List[DataLoader], int, Tuple[int, ...]]:
@@ -645,7 +645,7 @@ def create_task_datasets(
     参数:
         dataset_name: 数据集名称
         num_tasks: 任务数量
-        num_classes_per_task: 每个任务的类别数
+        num_classes_per_task: 每个任务的类别数 ('auto'=自动平均分配, 或数字字符串)
         batch_size: 批次大小
         data_root: 数据根目录
 
@@ -657,12 +657,19 @@ def create_task_datasets(
     if stats is None:
         raise ValueError(f"不支持的数据集: {dataset_name}")
 
-    num_classes = stats['num_classes']
+    total_num_classes = stats['num_classes']
     input_shape = (stats['num_channels'], stats['img_size'], stats['img_size'])
 
-    if num_classes < num_tasks * num_classes_per_task:
+    # 自动计算每个任务的类别数
+    if num_classes_per_task == 'auto':
+        num_classes_per_task = total_num_classes // num_tasks
+        print(f"[自动分配] {total_num_classes}个类别 ÷ {num_tasks}个任务 = 每任务{num_classes_per_task}个类别")
+    else:
+        num_classes_per_task = int(num_classes_per_task)
+
+    if total_num_classes < num_tasks * num_classes_per_task:
         raise ValueError(
-            f"数据集只有{num_classes}个类别，"
+            f"数据集只有{total_num_classes}个类别，"
             f"无法创建{num_tasks}个任务，每个任务{num_classes_per_task}个类别"
         )
 
@@ -737,7 +744,7 @@ def create_task_datasets(
         train_loaders.append(train_loader)
         test_loaders.append(test_loader)
 
-    return train_loaders, test_loaders, num_classes, input_shape
+    return train_loaders, test_loaders, num_classes_per_task, input_shape
 
 
 def run_continual_learning(args):
@@ -760,7 +767,10 @@ def run_continual_learning(args):
     # 创建任务数据集
     print(f"\n创建任务增量学习数据集: {args.dataset}")
     print(f"任务数量: {args.num_tasks}")
-    print(f"每个任务的类别数: {args.num_classes_per_task}")
+    if args.num_classes_per_task == 'auto':
+        print(f"每个任务的类别数: auto (自动分配)")
+    else:
+        print(f"每个任务的类别数: {args.num_classes_per_task}")
 
     train_loaders, test_loaders, num_classes, input_shape = create_task_datasets(
         dataset_name=args.dataset,
@@ -772,11 +782,28 @@ def run_continual_learning(args):
 
     # 创建模型
     print(f"\n创建模型: {args.model}")
-    if args.model == 'cnn':
+
+    # 根据数据集和参数选择合适的模型
+    if args.model == 'auto':
+        # 自动选择：MNIST用CNN，CIFAR用ResNet
+        if args.dataset == 'MNIST':
+            model = CNN_MNIST(num_classes=args.num_classes_per_task)
+            print(f"[自动选择] 使用CNN模型（适合MNIST）")
+        else:  # CIFAR10/CIFAR100
+            model = ResNet18(num_classes=args.num_classes_per_task)
+            print(f"[自动选择] 使用ResNet18模型（适合CIFAR）")
+    elif args.model == 'cnn':
+        # 强制使用CNN（可能不适用于CIFAR）
         if args.dataset == 'MNIST':
             model = CNN_MNIST(num_classes=args.num_classes_per_task)
         else:
-            model = ResNet18(num_classes=args.num_classes_per_task)
+            print("[警告] CNN模型可能不适用于CIFAR数据集")
+            print("[建议] 使用 --model resnet 或 --model auto")
+            model = CNN_MNIST(num_classes=args.num_classes_per_task)
+    elif args.model == 'resnet':
+        # 强制使用ResNet
+        model = ResNet18(num_classes=args.num_classes_per_task)
+        print(f"[指定] 使用ResNet18模型")
     else:
         raise ValueError(f"不支持的模型: {args.model}")
 
@@ -938,13 +965,13 @@ def main():
                        help='数据根目录')
     parser.add_argument('--num_tasks', type=int, default=5,
                        help='任务数量')
-    parser.add_argument('--num_classes_per_task', type=int, default=2,
-                       help='每个任务的类别数')
+    parser.add_argument('--num_classes_per_task', type=str, default='auto',
+                       help='每个任务的类别数 (auto=自动平均分配, 或指定数字如5)')
 
     # 模型参数
-    parser.add_argument('--model', type=str, default='cnn',
-                       choices=['cnn'],
-                       help='模型类型')
+    parser.add_argument('--model', type=str, default='auto',
+                       choices=['auto', 'cnn', 'resnet'],
+                       help='模型类型 (auto: MNIST用CNN, CIFAR用ResNet)')
 
     # 训练参数
     parser.add_argument('--batch_size', type=int, default=128,
