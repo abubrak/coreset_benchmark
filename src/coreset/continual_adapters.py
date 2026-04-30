@@ -12,6 +12,8 @@ from .bcsr_coreset import BCSRCoreset
 from .csrel_coreset import CSReLCoreset
 from .bilevel_coreset import BilevelCoreset
 from ..configs import BilevelConfig, CSReLConfig
+from ..models.resnet import ResNet18
+from ..models.cnn import CNN_MNIST
 
 
 class BCSRContinualAdapter:
@@ -230,16 +232,20 @@ class CSReLContinualAdapter:
         # Use a randomly initialized model as "current" model
         # Get num_classes from the reference model's last layer
         if hasattr(selector.reference_model, 'fc'):
-            num_classes = selector.reference_model.fc.out_features
+            ref_num_classes = selector.reference_model.fc.out_features
         elif hasattr(selector.reference_model, 'fc2'):
-            num_classes = selector.reference_model.fc2.out_features
+            ref_num_classes = selector.reference_model.fc2.out_features
         else:
-            # Fallback: use the num_classes we already have
-            num_classes = num_classes
+            ref_num_classes = num_classes
 
-        current_model = type(selector.reference_model)(
-            num_classes=num_classes
-        ).to(self.device)
+        # Use factory functions instead of type() reflection to avoid
+        # constructor signature mismatch (e.g., ResNet needs block, layers)
+        model_cls = type(selector.reference_model)
+        from ..models.resnet import ResNet
+        if isinstance(selector.reference_model, ResNet):
+            current_model = ResNet18(num_classes=ref_num_classes).to(self.device)
+        else:
+            current_model = model_cls(num_classes=ref_num_classes).to(self.device)
 
         selected_indices = selector.select(
             train_data=data,
