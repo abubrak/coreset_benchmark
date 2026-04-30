@@ -787,22 +787,22 @@ def run_continual_learning(args):
     if args.model == 'auto':
         # 自动选择：MNIST用CNN，CIFAR用ResNet
         if args.dataset == 'MNIST':
-            model = CNN_MNIST(num_classes=args.num_classes_per_task)
+            model = CNN_MNIST(num_classes=num_classes)
             print(f"[自动选择] 使用CNN模型（适合MNIST）")
         else:  # CIFAR10/CIFAR100
-            model = ResNet18(num_classes=args.num_classes_per_task)
+            model = ResNet18(num_classes=num_classes)
             print(f"[自动选择] 使用ResNet18模型（适合CIFAR）")
     elif args.model == 'cnn':
         # 强制使用CNN（可能不适用于CIFAR）
         if args.dataset == 'MNIST':
-            model = CNN_MNIST(num_classes=args.num_classes_per_task)
+            model = CNN_MNIST(num_classes=num_classes)
         else:
             print("[警告] CNN模型可能不适用于CIFAR数据集")
             print("[建议] 使用 --model resnet 或 --model auto")
-            model = CNN_MNIST(num_classes=args.num_classes_per_task)
+            model = CNN_MNIST(num_classes=num_classes)
     elif args.model == 'resnet':
         # 强制使用ResNet
-        model = ResNet18(num_classes=args.num_classes_per_task)
+        model = ResNet18(num_classes=num_classes)
         print(f"[指定] 使用ResNet18模型")
     else:
         raise ValueError(f"不支持的模型: {args.model}")
