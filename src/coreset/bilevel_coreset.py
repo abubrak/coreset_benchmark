@@ -248,8 +248,10 @@ class BilevelCoreset:
         K_val = K_val.to(device)
         y_val = y_val.to(device)
 
-        # 初始化 alpha（使用 Xavier 初始化）
+        # 初始化 alpha（使用 Xavier 初始化，受 random_state 控制）
         if alpha_init is None:
+            if self.random_state is not None:
+                torch.manual_seed(self.random_state)
             alpha = torch.randn(n_train, self.out_dim, device=device) * 0.01
         else:
             alpha = alpha_init.to(device)

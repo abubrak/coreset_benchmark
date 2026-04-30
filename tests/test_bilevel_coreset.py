@@ -185,21 +185,17 @@ def test_selection_scalability_large_scale():
     assert np.abs(weights.sum() - coreset_size) < 1e-3, "权重应该被适当归一化"
 
 
-@pytest.mark.skip(reason="当前实现不支持随机种子可重现性，需要在后续版本中修复")
 def test_random_state_reproducibility():
     """测试：使用相同随机种子应该产生相同结果"""
     np.random.seed(42)
     torch.manual_seed(42)
 
     n_train = 100
-    n_val = 20
     n_features = 20
     num_classes = 5
 
     X_train = np.random.randn(n_train, n_features).astype(np.float32)
-    y_train = torch.randint(0, num_classes, (n_train,))
-    X_val = np.random.randn(n_val, n_features).astype(np.float32)
-    y_val = torch.randint(0, num_classes, (n_val,))
+    y_train = np.random.randint(0, num_classes, n_train).astype(np.int64)
 
     def rbf_kernel(X1, X2, gamma=1.0):
         X1_sq = np.sum(X1 ** 2, axis=1, keepdims=True)
@@ -208,37 +204,36 @@ def test_random_state_reproducibility():
         dist_sq = np.maximum(dist_sq, 0.0)
         return np.exp(-gamma * dist_sq)
 
-    # 第一次运行
+    # 第一次运行 - 使用 random_state 参数
     selector1 = BilevelCoreset(
         max_outer_it=3,
         max_inner_it=10,
         tol=1e-6,
-        verbose=False
+        verbose=False,
+        random_state=42
     )
 
     indices1, weights1 = selector1.build_with_representer_proxy(
         X=X_train,
-        y=y_train.numpy(),
+        y=y_train,
         m=10,
         kernel_fn=rbf_kernel,
         device='cpu',
         val_ratio=0.2
     )
 
-    # 第二次运行（使用相同种子）
-    np.random.seed(42)
-    torch.manual_seed(42)
-
+    # 第二次运行（使用相同 random_state 种子）
     selector2 = BilevelCoreset(
         max_outer_it=3,
         max_inner_it=10,
         tol=1e-6,
-        verbose=False
+        verbose=False,
+        random_state=42
     )
 
     indices2, weights2 = selector2.build_with_representer_proxy(
         X=X_train,
-        y=y_train.numpy(),
+        y=y_train,
         m=10,
         kernel_fn=rbf_kernel,
         device='cpu',
@@ -247,9 +242,9 @@ def test_random_state_reproducibility():
 
     # 验证：结果应该完全相同
     assert np.array_equal(indices1, indices2), \
-        "使用相同随机种子应该产生相同的索引"
+        "使用相同 random_state 应该产生相同的索引"
     assert np.allclose(weights1, weights2, rtol=1e-5), \
-        "使用相同随机种子应该产生相同的权重"
+        "使用相同 random_state 应该产生相同的权重"
 
 
 if __name__ == '__main__':
