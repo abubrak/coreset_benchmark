@@ -91,6 +91,10 @@ class BCSRContinualAdapter:
         data = data.to(self.device)
         labels = labels.to(self.device)
 
+        # 确保模型在正确的设备上并记录原始设备
+        original_device = next(model.parameters()).device
+        model = model.to(self.device)
+
         # Use BCSR to select samples
         selected_X, selected_y, info = self.bcsr_selector.coreset_select(
             X=data,
@@ -98,6 +102,9 @@ class BCSRContinualAdapter:
             coreset_size=num_samples,
             model=model
         )
+
+        # 恢复模型到原始设备
+        model = model.to(original_device)
 
         # Convert back to torch tensors
         selected_data = torch.from_numpy(selected_X).to(self.device)
@@ -197,6 +204,10 @@ class CSReLContinualAdapter:
         data = data.to(self.device)
         labels = labels.to(self.device)
 
+        # 保护原始模型设备
+        original_device = next(model.parameters()).device
+        model = model.to(self.device)
+
         num_classes = labels.max().item() + 1
 
         # Get or create selector
@@ -237,6 +248,9 @@ class CSReLContinualAdapter:
             incremental=False,
             verbose=False
         )
+
+        # 恢复模型到原始设备
+        model = model.to(original_device)
 
         # Extract selected samples
         selected_data = data[selected_indices]

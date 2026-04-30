@@ -349,7 +349,7 @@ def compute_loss_dic(
     for d_id, loss_list in loss_dic.items():
         avg_loss_dic[d_id] = float(np.mean(loss_list))
 
-    if use_cuda:
-        model.cpu()
+    # 不要移动模型设备！模型应该保持在调用者指定的设备上
+    # 移除 model.cpu() 调用以避免设备不匹配问题
 
     return avg_loss_dic
