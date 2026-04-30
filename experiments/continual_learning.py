@@ -323,12 +323,17 @@ class CoresetBuffer:
             if model is None:
                 raise ValueError("BCSR method requires a model")
 
-            # Create adapter with default parameters
+            # Create adapter with Colab-optimized parameters
+            # 从性能优化中获得的最佳参数 (见BCSR_PERFORMANCE_ANALYSIS.md)
+            n_samples = len(data)
+            num_outer_steps = 2 if n_samples < 10000 else 1  # 大数据集进一步减少迭代
+            learning_rate_outer = 3.0  # 降低以提高稳定性
+
             adapter = BCSRContinualAdapter(
                 learning_rate_inner=0.01,
-                learning_rate_outer=5.0,
+                learning_rate_outer=learning_rate_outer,
                 num_inner_steps=1,
-                num_outer_steps=5,
+                num_outer_steps=num_outer_steps,
                 beta=0.1,
                 device=data.device
             )
