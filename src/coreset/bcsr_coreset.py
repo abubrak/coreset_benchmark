@@ -187,15 +187,46 @@ class BCSRCoreset:
 
         print(f"开始BCSR coreset选择，从{n_samples}个样本中选择{coreset_size}个")
 
+        # 性能优化: 对超大数据集进行预采样
+        MAX_SAMPLES_FOR_BILEVEL = 3000  # 双层优化最大样本数
+        use_presampling = n_samples > MAX_SAMPLES_FOR_BILEVEL
+        presample_indices = None  # 初始化
+
+        initial_data = X
+        initial_labels = y
+
+        if use_presampling:
+            print(f"[性能优化] 数据集过大({n_samples}样本)，先随机预采样到{MAX_SAMPLES_FOR_BILEVEL}个样本")
+            # 随机预采样，保持类别平衡
+            presample_indices = []
+            num_classes = y.max().item() + 1
+            samples_per_class = MAX_SAMPLES_FOR_BILEVEL // num_classes
+
+            for c in range(num_classes):
+                class_mask = (y == c)
+                class_indices = torch.where(class_mask)[0]
+
+                if len(class_indices) > 0:
+                    n_select = min(samples_per_class, len(class_indices))
+                    perm = torch.randperm(len(class_indices))[:n_select]
+                    presample_indices.append(class_indices[perm])
+
+            presample_indices = torch.cat(presample_indices)
+            initial_data = initial_data[presample_indices]
+            initial_labels = y[presample_indices]
+            print(f"[预采样完成] 选择了{len(presample_indices)}个样本（类别平衡）")
+
+        n_samples = initial_data.shape[0]
+
         # 方法1: 如果提供了模型，使用基于双层优化的方法
         if model is not None:
             weights = self._optimize_weights_with_model(
-                X, y, model, coreset_size
+                initial_data, initial_labels, model, coreset_size
             )
         # 方法2: 否则使用简化的基于核的方法
         else:
             weights = self._optimize_weights_kernel(
-                X, y, validation_split
+                initial_data, initial_labels, validation_split
             )
 
         # 使用torch.multinomial进行采样选择
@@ -209,11 +240,19 @@ class BCSRCoreset:
         if self.random_state is not None:
             generator = torch.Generator()
             generator.manual_seed(self.random_state)
-            top_k_indices = torch.multinomial(weights_tensor, coreset_size,
+            sampled_indices = torch.multinomial(weights_tensor, coreset_size,
                                               replacement=False, generator=generator).numpy()
         else:
-            top_k_indices = torch.multinomial(weights_tensor, coreset_size,
+            sampled_indices = torch.multinomial(weights_tensor, coreset_size,
                                               replacement=False).numpy()
+
+        # 如果使用了预采样，需要将索引映射回原始数据空间
+        if use_presampling:
+            # presample_indices是预采样到原始数据的索引
+            # sampled_indices是预采样数据中的索引
+            top_k_indices = presample_indices[sampled_indices]
+        else:
+            top_k_indices = sampled_indices
 
         # 提取选择的样本
         if isinstance(X, torch.Tensor):
@@ -260,6 +299,9 @@ class BCSRCoreset:
         """
         使用模型进行双层优化来学习权重
 
+        **性能优化**: 对于大数据集(>5000样本),自动切换到核方法模式
+        以避免内存爆炸和计算时间过长。
+
         参数:
             X: 训练数据
             y: 标签
@@ -269,9 +311,17 @@ class BCSRCoreset:
         返回:
             weights: 学习到的样本权重
         """
+        n_samples = X.shape[0]
+
+        # 性能优化: 对大数据集使用核方法
+        # 双层优化在大数据集上: O(n^3) 复杂度，太慢
+        if n_samples > 5000:
+            print(f"[性能优化] 数据集较大({n_samples}样本)，使用快速核方法模式")
+            print(f"[提示] 如需使用完整双层优化，可减少样本数或增加内存")
+            return self._optimize_weights_kernel(X, y, validation_split=0.2)
+
         from ..training.bcsr_training import BCSRTraining
 
-        n_samples = X.shape[0]
         X = X.to(self.device)
         y = y.to(self.device)
 
@@ -333,11 +383,12 @@ class BCSRCoreset:
         # 归一化（PyTorch）
         X_norm = X_flat / (torch.norm(X_flat, dim=1, keepdim=True) + 1e-8)
 
-        # 计算RBF核均值（分批计算，避免 OOM）
+        # 计算RBF核均值（分批计算，避免 OOM，增大batch利用GPU）
         gamma = 1.0 / X_flat.shape[1]
 
         # 分批计算多样性得分：只需要 K.mean(axis=1)，不需要完整矩阵
-        batch_size = 1024
+        # 增大batch_size以更好利用GPU并行计算
+        batch_size = 4096  # 从1024增加到4096，减少循环次数
         diversity_scores = torch.zeros(n_samples, device=device)
 
         X_norm_sq = torch.sum(X_norm ** 2, dim=1)  # (n,)
@@ -375,6 +426,8 @@ class BCSRCoreset:
 
         # 归一化到单纯形（PyTorch 版）
         weights = self.projection_onto_simplex_torch(weights)
+
+        print(f"[BCSR核方法] 完成权重计算，数据集大小={n_samples}，设备={device}")
 
         return weights.cpu().numpy()
 
