@@ -118,9 +118,8 @@ def test_selection_complexity_is_feasible():
     assert np.abs(weights.sum() - coreset_size) < 1e-3, "权重应该被适当归一化"
 
 
-@pytest.mark.xfail(reason="当前贪心实现对于大规模数据太慢，需要优化", strict=True)
 def test_selection_scalability_large_scale():
-    """测试：大规模数据集上选择算法的可扩展性（预期失败）"""
+    """测试：大规模数据集上选择算法的可扩展性"""
     np.random.seed(42)
     torch.manual_seed(42)
 
@@ -170,8 +169,7 @@ def test_selection_scalability_large_scale():
     print(f"理论复杂度: O(m × n_train × n_val) = O({coreset_size} × {n_train} × {n_val})")
     print(f"估计操作数: {coreset_size * n_train * n_val:.2e}")
 
-    # 这个测试应该失败，因为当前实现太慢
-    # 目标：优化后在合理时间内（如2分钟）完成
+    # 目标：在合理时间内（如2分钟）完成
     assert elapsed_time < 120.0, f"大规模数据集选择时间过长: {elapsed_time:.2f}秒，需要优化算法"
 
     # 验证结果
