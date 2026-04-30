@@ -298,9 +298,10 @@ class BilevelContinualAdapter:
         model: nn.Module
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Select coreset samples using simplified Bilevel method.
+        Select coreset samples using simplified Bilevel method with class balancing.
 
         Uses kernel herding as a proxy for bilevel optimization.
+        Ensures class-balanced selection by sampling proportionally from each class.
 
         Parameters
         ----------
@@ -327,28 +328,97 @@ class BilevelContinualAdapter:
         n_samples = data.shape[0]
         num_samples = min(num_samples, n_samples)
 
-        # Flatten data for kernel computation
-        data_flat = data.view(n_samples, -1)
+        # Get unique labels and their counts
+        unique_labels = torch.unique(labels)
+        num_classes = len(unique_labels)
 
-        # Kernel herding (simplified bilevel proxy)
+        # Class-balanced selection
         selected_indices = []
-        remaining_indices = list(range(n_samples))
+        samples_per_class = num_samples // num_classes
+        remaining_samples = num_samples % num_classes
 
-        # Mean of all samples in kernel space
-        K_all = self._rbf_kernel(data, data)
-        kernel_mean = K_all.mean(dim=0)
+        # Select samples from each class using kernel herding
+        for class_idx, label in enumerate(unique_labels):
+            # Get indices of samples in this class
+            class_mask = (labels == label)
+            class_indices = torch.where(class_mask)[0]
 
-        # Current sum in kernel space
-        current_sum = torch.zeros(n_samples, device=self.device)
+            # Determine how many to select from this class
+            n_select = samples_per_class
+            if class_idx < remaining_samples:
+                n_select += 1
+
+            n_select = min(n_select, len(class_indices))
+
+            if n_select == 0:
+                continue
+
+            # Get data for this class
+            class_data = data[class_indices]
+
+            # Kernel herding within this class
+            class_selected = self._kernel_herding(class_data, n_select)
+
+            # Map back to original indices
+            original_indices = class_indices[class_selected]
+            selected_indices.append(original_indices)
+
+        # Concatenate all selected indices
+        if len(selected_indices) > 0:
+            selected_indices = torch.cat(selected_indices)
+        else:
+            # Fallback to random selection
+            selected_indices = torch.randperm(n_samples)[:num_samples]
+
+        selected_data = data[selected_indices]
+        selected_labels = labels[selected_indices]
+
+        return selected_data, selected_labels
+
+    def _kernel_herding(
+        self,
+        data: torch.Tensor,
+        num_samples: int
+    ) -> torch.Tensor:
+        """
+        Kernel herding for a single class.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Data samples of shape (n_samples, C, H, W).
+        num_samples : int
+            Number of samples to select.
+
+        Returns
+        -------
+        torch.Tensor
+            Indices of selected samples within the input data.
+        """
+        n = data.shape[0]
+        num_samples = min(num_samples, n)
+
+        # Flatten data for kernel computation
+        data_flat = data.view(n, -1)
+
+        # Compute kernel matrix for this class
+        K = self._rbf_kernel(data, data)
+
+        # Mean in kernel space
+        kernel_mean = K.mean(dim=0)
+
+        # Kernel herding
+        selected = []
+        remaining = list(range(n))
+        current_sum = torch.zeros(n, device=self.device)
 
         for _ in range(num_samples):
             best_idx = None
             best_dist = float('inf')
 
-            for idx in remaining_indices:
-                # Compute distance to kernel mean if we add this sample
-                new_sum = current_sum + K_all[idx]
-                new_mean = new_sum / (len(selected_indices) + 1)
+            for idx in remaining:
+                new_sum = current_sum + K[idx]
+                new_mean = new_sum / (len(selected) + 1)
                 dist = torch.norm(kernel_mean - new_mean)
 
                 if dist < best_dist:
@@ -356,11 +426,8 @@ class BilevelContinualAdapter:
                     best_idx = idx
 
             if best_idx is not None:
-                selected_indices.append(best_idx)
-                remaining_indices.remove(best_idx)
-                current_sum += K_all[best_idx]
+                selected.append(best_idx)
+                remaining.remove(best_idx)
+                current_sum += K[best_idx]
 
-        selected_data = data[selected_indices]
-        selected_labels = labels[selected_indices]
-
-        return selected_data, selected_labels
+        return torch.tensor(selected, dtype=torch.long)

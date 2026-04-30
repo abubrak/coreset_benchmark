@@ -45,6 +45,27 @@ from src.coreset.continual_adapters import (
 )
 
 
+class RemappedDataset(torch.utils.data.Dataset):
+    """重新映射标签的数据集"""
+    def __init__(self, subset, class_mapping):
+        """
+        参数:
+            subset: 原始数据子集
+            class_mapping: 从旧标签到新标签的映射字典
+        """
+        self.subset = subset
+        self.class_mapping = class_mapping
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, idx):
+        data, label = self.subset[idx]
+        # 重新映射标签
+        remapped_label = self.class_mapping[label]
+        return data, remapped_label
+
+
 class CoresetBuffer:
     """
     持续学习的内存缓冲区
@@ -174,7 +195,7 @@ class CoresetBuffer:
         batch_size: int,
         shuffle: bool = True,
         num_workers: int = 0
-    ) -> DataLoader:
+    ) -> Optional[DataLoader]:
         """
         获取缓冲区的数据加载器
 
@@ -408,6 +429,7 @@ def train_task(
     train_total = 0
 
     # 获取缓冲区数据加载器
+    # 不需要重新映射标签，因为缓冲区中存储的就是本地标签（0,1等）
     buffer_loader = buffer.get_dataloader(
         batch_size=train_loader.batch_size,
         shuffle=True
@@ -686,6 +708,10 @@ def create_task_datasets(
         # 重新映射标签到0..num_classes_per_task-1
         class_mapping = {old_class: i for i, old_class in enumerate(task_classes)}
 
+        # 使用RemappedDataset重新映射标签
+        train_subset = RemappedDataset(train_subset, class_mapping)
+        test_subset = RemappedDataset(test_subset, class_mapping)
+
         # 创建数据加载器
         train_loader = DataLoader(
             train_subset,
@@ -790,7 +816,7 @@ def run_continual_learning(args):
         print(f"训练完成 - 损失: {train_stats['loss']:.4f}, 准确率: {train_stats['accuracy']:.2f}%")
 
         # 从当前任务中选择样本添加到缓冲区
-        # 收集所有数据
+        # 收集所有数据（标签已经是本地标签0,1等，不需要重新映射）
         all_data = []
         all_labels = []
         for data, labels in train_loaders[task_id]:
@@ -800,14 +826,11 @@ def run_continual_learning(args):
         all_data = torch.cat(all_data, dim=0)
         all_labels = torch.cat(all_labels, dim=0)
 
-        # 重新映射标签到全局空间
-        global_labels = all_labels + task_id * args.num_classes_per_task
-
-        # 选择coreset样本
+        # 选择coreset样本（使用本地标签）
         num_samples = min(args.memory_size // args.num_tasks, len(all_data))
         selected_data, selected_labels = buffer.select_coreset(
             data=all_data,
-            labels=global_labels,
+            labels=all_labels,  # 使用本地标签，不映射到全局空间
             num_samples=num_samples,
             method=args.selection_method,
             model=model
