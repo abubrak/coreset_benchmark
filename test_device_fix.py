@@ -12,6 +12,29 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.coreset.continual_adapters import BCSRContinualAdapter
 from src.models.cnn import CNN_MNIST
 
+
+def devices_equal(device1, device2):
+    """
+    比较两个设备是否相同，处理cuda和cuda:0的情况
+
+    torch.device('cuda') 和 torch.device('cuda:0') 应该被认为是相同的
+    """
+    if device1.type != device2.type:
+        return False
+
+    # 对于CPU设备，直接比较
+    if device1.type == 'cpu':
+        return True
+
+    # 对于CUDA设备，如果有索引就比较索引，否则认为相同
+    if device1.type == 'cuda':
+        index1 = device1.index if device1.index is not None else 0
+        index2 = device2.index if device2.index is not None else 0
+        return index1 == index2
+
+    return False
+
+
 def test_device_management():
     """测试BCSR适配器的设备管理"""
     print("测试BCSR适配器设备管理修复")
@@ -55,10 +78,12 @@ def test_device_management():
         model_device_after = next(model.parameters()).device
         print(f"选择后模型设备: {model_device_after}")
 
-        if model_device_after == torch.device(device):
+        # 使用健壮的设备比较函数
+        expected_device = torch.device(device)
+        if devices_equal(model_device_after, expected_device):
             print(f"[OK] 模型设备保持不变: {model_device_after}")
         else:
-            print(f"[FAIL] 模型设备被改变: {model_device_after} != {torch.device(device)}")
+            print(f"[FAIL] 模型设备被改变: {model_device_after} != {expected_device}")
             return False
 
         # 检查选择的数据是否在正确设备上
